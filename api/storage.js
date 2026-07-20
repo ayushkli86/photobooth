@@ -1,66 +1,68 @@
 /**
- * Storage layer — Vercel KV with in-memory fallback
- * For production: uses @vercel/kv (Redis)
- * For local dev: uses in-memory Map
+ * Storage layer — Upstash Redis (Vercel) with in-memory fallback (local dev)
  */
 
-// In-memory fallback for local development
-const memStore = new Map();
+const { Redis } = require('@upstash/redis');
 
-// Try Vercel KV, fallback to memory
-let kv = null;
-try {
-  if (process.env.KV_REST_API_URL) {
-    const { kv: kvClient } = require('@vercel/kv');
-    kv = kvClient;
+let redis = null;
+
+// Vercel provides these env vars when Upstash is connected
+if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
+  redis = new Redis({
+    url: process.env.KV_REST_API_URL,
+    token: process.env.KV_REST_API_TOKEN,
+  });
+  console.log('Using Upstash Redis storage');
+} else {
+  console.log('Using in-memory storage (local dev only)');
+}
+
+// ── In-memory fallback ──────────────────────
+const memStore = new Map();
+const memExpiry = new Map();
+
+function memGet(key) {
+  const exp = memExpiry.get(key);
+  if (exp && Date.now() > exp) {
+    memStore.delete(key);
+    memExpiry.delete(key);
+    return null;
   }
-} catch (e) {
-  console.log('Vercel KV not available, using in-memory storage');
+  return memStore.get(key) || null;
 }
 
 const Storage = {
   async get(key) {
-    if (kv) {
-      return await kv.get(key);
+    if (redis) {
+      try { return await redis.get(key); } catch (e) { console.error('Redis get error:', e); return null; }
     }
-    const val = memStore.get(key);
-    return val || null;
+    return memGet(key);
   },
 
   async set(key, value, ttl) {
-    if (kv) {
-      if (ttl) {
-        await kv.set(key, value, { ex: ttl });
-      } else {
-        await kv.set(key, value);
-      }
-    } else {
-      memStore.set(key, value);
-      // Auto-expire for in-memory (1 hour)
-      if (ttl) {
-        setTimeout(() => memStore.delete(key), ttl * 1000);
-      } else {
-        setTimeout(() => memStore.delete(key), 3600000);
-      }
+    if (redis) {
+      try {
+        if (ttl) {
+          await redis.set(key, JSON.stringify(value), { ex: ttl });
+        } else {
+          await redis.set(key, JSON.stringify(value));
+        }
+      } catch (e) { console.error('Redis set error:', e); }
+      return;
     }
+    memStore.set(key, value);
+    if (ttl) memExpiry.set(key, Date.now() + ttl * 1000);
+    else memExpiry.set(key, Date.now() + 3600000);
   },
 
   async del(key) {
-    if (kv) {
-      await kv.del(key);
-    } else {
-      memStore.delete(key);
+    if (redis) {
+      try { await redis.del(key); } catch (e) { console.error('Redis del error:', e); }
+      return;
     }
+    memStore.delete(key);
+    memExpiry.delete(key);
   },
-
-  async incr(key) {
-    if (kv) {
-      return await kv.incr(key);
-    }
-    const val = (memStore.get(key) || 0) + 1;
-    memStore.set(key, val);
-    return val;
-  }
 };
 
 module.exports = Storage;
