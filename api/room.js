@@ -82,30 +82,6 @@ module.exports = async (req, res) => {
         return res.status(200).json({ ok: true, room });
       }
 
-      // WebRTC signaling: save a signal message (room-level queue)
-      case 'signal': {
-        if (!code || !userId || !body.type) return res.status(400).json({ error: 'Missing fields' });
-        const signalKey = 'signals:' + code.toUpperCase();
-        const { type, data } = body;
-        let signals = await Storage.get(signalKey);
-        if (typeof signals === 'string') { try { signals = JSON.parse(signals); } catch(e) { signals = []; } }
-        if (!Array.isArray(signals)) signals = [];
-        signals.push({ type, data, from: userId, ts: Date.now() });
-        if (signals.length > 100) signals = signals.slice(-100);
-        await Storage.set(signalKey, signals, 3600);
-        return res.status(200).json({ ok: true });
-      }
-
-      // WebRTC signaling: get all signals since timestamp
-      case 'get-signals': {
-        if (!code) return res.status(400).json({ error: 'Code required' });
-        const signalKey = 'signals:' + code.toUpperCase();
-        let signals = await Storage.get(signalKey);
-        if (typeof signals === 'string') { try { signals = JSON.parse(signals); } catch(e) { signals = []; } }
-        if (!Array.isArray(signals)) signals = [];
-        return res.status(200).json({ ok: true, signals });
-      }
-
       case 'leave': {
         if (!code) return res.status(400).json({ error: 'Code required' });
         const room = await getRoom(code.toUpperCase());
