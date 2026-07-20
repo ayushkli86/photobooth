@@ -82,7 +82,36 @@ module.exports = async (req, res) => {
         return res.status(200).json({ ok: true, room });
       }
 
-      case 'leave': {
+      // Upload a photo to Redis (guest sends to host via server)
+      case 'save-photo': {
+        if (!code || !userId || body.photoIndex === undefined || !body.imageData) {
+          return res.status(400).json({ error: 'Missing fields' });
+        }
+        const photoKey = 'photo:' + code.toUpperCase() + ':' + userId + ':' + body.photoIndex;
+        // Store with 1 hour TTL
+        await Storage.set(photoKey, body.imageData, 3600);
+        return res.status(200).json({ ok: true });
+      }
+
+      // Download photos for a room (host retrieves guest's photos)
+      case 'get-photos': {
+        if (!code || !userId) return res.status(400).json({ error: 'Missing fields' });
+        const room = await getRoom(code.toUpperCase());
+        if (!room) return res.status(404).json({ error: 'Room not found' });
+
+        // Determine whose photos to retrieve
+        const targetUserId = body.targetUserId;
+        if (!targetUserId) return res.status(400).json({ error: 'targetUserId required' });
+
+        const photos = [];
+        for (let i = 0; i < 4; i++) {
+          const photoKey = 'photo:' + code.toUpperCase() + ':' + targetUserId + ':' + i;
+          let data = await Storage.get(photoKey);
+          if (typeof data === 'string') photos.push(data);
+          else photos.push(null);
+        }
+        return res.status(200).json({ ok: true, photos });
+      }
         if (!code) return res.status(400).json({ error: 'Code required' });
         const room = await getRoom(code.toUpperCase());
         if (room) {
