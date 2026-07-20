@@ -1,12 +1,6 @@
 /**
- * PHOTOBHOOH — Main Application (v3 — connection visibility fixed)
- *
- * All v2 fixes plus:
- * - Big toast notification when partner connects
- * - Partner status visible on theme selector page
- * - Mobile-friendly status indicators
- * - Host sees clear "Partner joined!" + can start session
- * - Guest sees big "Connected!" indicator
+ * PHOTOBHOOH — v4 WebSocket-powered (no polling)
+ * Socket.io for real-time sync, no cold start issues
  */
 (function(){
   'use strict';
@@ -15,12 +9,11 @@
     code: null, userId: null, theme: 'classic', isHost: false,
     partnerConnected: false, currentPhoto: 0, totalPhotos: 4,
     photos: [null,null,null,null], myStream: null,
-    capturing: false, pollTimer: null, sessionStarted: false
+    capturing: false, sessionStarted: false, socket: null
   };
 
   const $ = s => document.querySelector(s);
   const $$ = s => document.querySelectorAll(s);
-  const API = '/api/room';
 
   const E = {
     landing: $('#landing'), booth: $('#booth'),
@@ -36,13 +29,121 @@
     captureHint: $('#captureHint'), progress: $('#photoProgress'),
     stripResult: $('#stripResult'), stripCanvas: $('#stripCanvas'),
     downloadBtn: $('#downloadBtn'), retakeBtn: $('#retakeBtn'),
-    // NEW elements
-    toast: $('#toast'),
-    themePartnerStatus: $('#themePartnerStatus')
+    toast: $('#toast'), themePartnerStatus: $('#themePartnerStatus')
   };
 
+  // ── CONNECT SOCKET.IO ────────────────────────
+  function connectSocket(){
+    return new Promise((resolve, reject) => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const url = window.location.origin;
+
+      S.socket = io(url, {
+        path: '/api/ws',
+        transports: ['websocket', 'polling'],
+        reconnection: true,
+        reconnectionAttempts: 10,
+        reconnectionDelay: 1000,
+        timeout: 10000,
+      });
+
+      S.socket.on('connect', () => {
+        console.log('[ws] Connected:', S.socket.id);
+        resolve();
+      });
+
+      S.socket.on('connect_error', (err) => {
+        console.error('[ws] Connection error:', err.message);
+      });
+
+      S.socket.on('disconnect', (reason) => {
+        console.log('[ws] Disconnected:', reason);
+        showToast('Connection lost. Reconnecting...');
+      });
+
+      S.socket.on('reconnect', () => {
+        console.log('[ws] Reconnected');
+        showToast('Reconnected!');
+        // Re-join room if we have a code
+        if(S.code && S.userId){
+          if(S.isHost){
+            S.socket.emit('create-room', { code:S.code, userId:S.userId, theme:S.theme }, ()=>{});
+          } else {
+            S.socket.emit('join-room', { code:S.code, userId:S.userId }, ()=>{});
+          }
+        }
+      });
+
+      // ── REAL-TIME EVENTS ──────────────────────
+      S.socket.on('partner-joined', ({ userId }) => {
+        S.partnerConnected = true;
+        updatePartnerStatus(true);
+        showToast('🎀 Partner connected!');
+        E.captureBtn.disabled = false;
+
+        if(S.isHost){
+          if(E.themePartnerStatus) E.themePartnerStatus.innerHTML = '<span class="status-connected">✓ Partner connected!</span>';
+          if(E.startBtn){
+            E.startBtn.disabled = false;
+            E.startBtn.innerHTML = 'Start the session <span class="btn-arrow">▷</span>';
+          }
+          E.captureHint.textContent = 'Partner joined! Click start.';
+        } else {
+          E.captureHint.textContent = 'Connected! Waiting for host to start...';
+        }
+      });
+
+      S.socket.on('partner-left', () => {
+        S.partnerConnected = false;
+        updatePartnerStatus(false);
+        showToast('Partner disconnected');
+        E.captureBtn.disabled = true;
+        if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Partner left. Waiting...';
+        E.captureHint.textContent = 'Partner disconnected...';
+      });
+
+      S.socket.on('room-state', ({ state, currentPhoto, theme, isHost }) => {
+        S.theme = theme;
+        if(currentPhoto !== undefined) S.currentPhoto = currentPhoto;
+      });
+
+      S.socket.on('session-started', ({ theme }) => {
+        S.sessionStarted = true;
+        S.theme = theme;
+        E.themeSel.classList.add('hidden');
+        E.camArea.classList.remove('hidden');
+        E.captureBtn.disabled = false;
+        E.captureHint.textContent = 'Session started! Tap to take a photo.';
+      });
+
+      S.socket.on('countdown', ({ photoIndex }) => {
+        // Partner triggered countdown — both do it
+        if(!S.capturing){
+          startCountdown(photoIndex);
+        }
+      });
+
+      S.socket.on('retake', () => {
+        S.currentPhoto = 0;
+        S.photos = [null,null,null,null];
+        S.capturing = false;
+        S.sessionStarted = true;
+        $$('.progress-dot').forEach((d, i) => {
+          d.classList.remove('done', 'active');
+          if(i === 0) d.classList.add('active');
+        });
+        E.stripResult.classList.add('hidden');
+        E.camArea.classList.remove('hidden');
+        E.captureBtn.disabled = false;
+        E.captureHint.textContent = 'Photo 1 of 4 — tap!';
+      });
+
+      setTimeout(() => reject(new Error('Connection timeout')), 10000);
+    });
+  }
+
   // ── INIT ─────────────────────────────────────
-  function init(){
+  async function init(){
     E.createBtn.addEventListener('click', createRoom);
     E.joinBtn.addEventListener('click', joinRoom);
     E.joinInput.addEventListener('keypress', e => { if(e.key==='Enter') joinRoom(); });
@@ -60,6 +161,15 @@
 
     S.userId = 'u_' + Math.random().toString(36).slice(2,10);
 
+    // Connect WebSocket first
+    try {
+      await connectSocket();
+    } catch(e) {
+      console.error('Failed to connect:', e);
+      showError('Could not connect to server. Please refresh.');
+      return;
+    }
+
     // Auto-join from URL hash
     const h = window.location.hash.slice(1);
     if(h && h.length >= 4){
@@ -68,46 +178,21 @@
     }
   }
 
-  // ── TOAST NOTIFICATION ───────────────────────
-  function showToast(message, duration = 4000){
-    if(!E.toast) return;
-    E.toast.textContent = message;
-    E.toast.classList.add('show');
-    setTimeout(() => E.toast.classList.remove('show'), duration);
-  }
-
-  // ── API HELPER with retry ────────────────────
-  async function api(body, retries = 2){
-    for(let attempt = 0; attempt <= retries; attempt++){
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10000);
-        const r = await fetch(API, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-          signal: controller.signal
-        });
-        clearTimeout(timeout);
-        return await r.json();
-      } catch(e) {
-        if(attempt === retries) {
-          console.error('API failed:', e);
-          return { ok: false, error: 'Network error' };
-        }
-        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
-      }
-    }
-  }
-
   // ── CREATE ROOM ──────────────────────────────
   async function createRoom(){
     try {
       hideError();
       setLoading(E.createBtn, 'Creating...');
-      const res = await api({ action:'create', theme: S.theme, userId: S.userId });
-      if(!res.ok) throw new Error(res.error);
-      S.code = res.code;
+      const code = generateCode();
+
+      await new Promise((resolve, reject) => {
+        S.socket.emit('create-room', { code, userId:S.userId, theme:S.theme }, (res) => {
+          if(!res.ok) reject(new Error(res.error));
+          else resolve(res);
+        });
+      });
+
+      S.code = code;
       S.isHost = true;
       enterBooth();
     } catch(e){
@@ -116,21 +201,35 @@
     }
   }
 
+  function generateCode(){
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for(let i=0; i<5; i++) code += chars[Math.floor(Math.random()*chars.length)];
+    return code;
+  }
+
   // ── JOIN ROOM ────────────────────────────────
   async function joinRoom(){
     const code = E.joinInput.value.trim().toUpperCase();
     if(!code || code.length < 4){ showError('Enter a valid room code'); return; }
+
     try {
       hideError();
       setLoading(E.joinBtn, 'Joining...');
-      const res = await api({ action:'join', code, userId: S.userId });
-      if(!res.ok) throw new Error(res.error);
-      S.code = res.code;
-      S.theme = res.room.theme || 'classic';
+
+      await new Promise((resolve, reject) => {
+        S.socket.emit('join-room', { code, userId:S.userId }, (res) => {
+          if(!res.ok) reject(new Error(res.error));
+          else resolve(res);
+        });
+      });
+
+      S.code = code;
       S.isHost = false;
+      S.partnerConnected = true; // Host exists
       enterBooth();
     } catch(e){
-      showError(e.message || 'Could not join room');
+      showError(e.message || 'Room not found');
       resetBtn(E.joinBtn, 'Join');
     }
   }
@@ -142,17 +241,19 @@
     window.history.replaceState(null, '', '#' + S.code);
 
     if(S.isHost){
-      // Host: show theme selector, hide camera for now
       E.themeSel.style.display = '';
       E.camArea.classList.add('hidden');
-      // Show partner status on theme selector
       if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Waiting for partner to join...';
-      if(E.startBtn) E.startBtn.disabled = true;
+      if(E.startBtn){
+        E.startBtn.disabled = true;
+        E.startBtn.innerHTML = 'Waiting for partner... <span class="btn-arrow">▷</span>';
+      }
+      updatePartnerStatus(false);
     } else {
-      // Guest: skip theme selector, go straight to camera
       E.themeSel.style.display = 'none';
       E.camArea.classList.remove('hidden');
-      E.captureHint.textContent = 'Connecting...';
+      E.captureHint.textContent = 'Connected! Waiting for host to start...';
+      updatePartnerStatus(true);
     }
 
     $$('.theme-card').forEach(c => c.classList.toggle('active', c.dataset.theme === S.theme));
@@ -166,87 +267,18 @@
       S.myStream = stream;
       E.myVideo.srcObject = stream;
     } catch(e){
-      console.warn('Camera denied:', e);
-      showError('Camera access is required. Please allow camera and refresh.');
+      showError('Camera access required. Please allow camera and refresh.');
     }
-
-    // Start polling IMMEDIATELY
-    startPolling();
   }
 
-  // ── START SESSION (host clicks "Start") ──────
-  async function startSession(){
+  // ── START SESSION (host) ─────────────────────
+  function startSession(){
     E.themeSel.classList.add('hidden');
     E.camArea.classList.remove('hidden');
     S.sessionStarted = true;
-    await api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:0, userId:S.userId });
+    S.socket.emit('start-session', { code:S.code, theme:S.theme });
     E.captureBtn.disabled = false;
     E.captureHint.textContent = 'Tap to take the first photo!';
-  }
-
-  // ── POLLING ──────────────────────────────────
-  function startPolling(){
-    if(S.pollTimer) clearInterval(S.pollTimer);
-    pollRoom();
-    S.pollTimer = setInterval(pollRoom, 3000);
-  }
-
-  async function pollRoom(){
-    if(!S.code) return;
-    try {
-      const res = await api({ action:'get', code:S.code });
-      if(!res.ok) return;
-      const room = res.room;
-
-      // Partner status
-      const wasConnected = S.partnerConnected;
-      S.partnerConnected = !!room.guest;
-
-      if(S.partnerConnected && !wasConnected){
-        // PARTNER JUST JOINED — big notification!
-        updatePartnerStatus(true);
-        showToast('🎀 Partner connected!');
-
-        if(S.isHost){
-          // Host: enable start button
-          if(E.themePartnerStatus) E.themePartnerStatus.innerHTML = '<span class="status-connected">✓ Partner connected!</span>';
-          if(E.startBtn){
-            E.startBtn.disabled = false;
-            E.startBtn.innerHTML = 'Start the session <span class="btn-arrow">▷</span>';
-          }
-          // If host already started session, enable capture
-          if(S.sessionStarted){
-            E.captureBtn.disabled = false;
-            E.captureHint.textContent = 'Partner joined! Tap to take a photo.';
-          }
-        } else {
-          // Guest: show connected status
-          E.captureBtn.disabled = false;
-          E.captureHint.textContent = 'Connected! Tap to take a photo.';
-        }
-      }
-
-      // Host: detect if partner left
-      if(!S.partnerConnected && wasConnected){
-        updatePartnerStatus(false);
-        showToast('Partner disconnected');
-        E.captureBtn.disabled = true;
-        if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Partner left. Waiting for new partner...';
-        E.captureHint.textContent = 'Partner disconnected...';
-      }
-
-      // Guest: sync state from host
-      if(room.state === 'shooting' && !S.sessionStarted && !S.isHost){
-        S.sessionStarted = true;
-        S.currentPhoto = room.currentPhoto || 0;
-        E.camArea.classList.remove('hidden');
-        E.captureBtn.disabled = false;
-        E.captureHint.textContent = `Photo ${S.currentPhoto + 1} of ${S.totalPhotos}`;
-      }
-
-    } catch(e){
-      // Silent fail for polling
-    }
   }
 
   // ── CAPTURE ──────────────────────────────────
@@ -255,10 +287,8 @@
     S.capturing = true;
     E.captureBtn.disabled = true;
 
-    if(S.isHost){
-      api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:S.currentPhoto, userId:S.userId });
-    }
-    startCountdown(S.currentPhoto);
+    // Both sides trigger countdown simultaneously
+    S.socket.emit('start-countdown', { code:S.code, photoIndex:S.currentPhoto });
   }
 
   function startCountdown(idx){
@@ -273,7 +303,7 @@
     };
     animate();
 
-    const iv = setInterval(async () => {
+    const iv = setInterval(() => {
       count--;
       if(count > 0){
         E.countNum.textContent = count;
@@ -283,12 +313,12 @@
         E.countdown.classList.add('hidden');
         E.flash.classList.add('active');
         setTimeout(() => E.flash.classList.remove('active'), 150);
-        await doCapture(idx);
+        doCapture(idx);
       }
     }, 1000);
   }
 
-  async function doCapture(idx){
+  function doCapture(idx){
     const v = E.myVideo, c = E.myCanvas;
     c.width = v.videoWidth || 640;
     c.height = v.videoHeight || 480;
@@ -311,10 +341,8 @@
     S.currentPhoto = idx + 1;
     S.capturing = false;
 
-    api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:S.currentPhoto, userId:S.userId });
-
     if(S.currentPhoto >= S.totalPhotos){
-      api({ action:'update-state', code:S.code, state:'done', userId:S.userId });
+      S.socket.emit('strip-complete', { code:S.code });
       setTimeout(showStrip, 800);
     } else {
       E.captureBtn.disabled = false;
@@ -354,27 +382,17 @@
     a.click();
   }
 
-  async function retake(){
+  function retake(){
     S.currentPhoto = 0;
     S.photos = [null,null,null,null];
     S.capturing = false;
-    S.sessionStarted = true;
-    $$('.progress-dot').forEach((d, i) => {
-      d.classList.remove('done', 'active');
-      if(i === 0) d.classList.add('active');
-    });
-    E.stripResult.classList.add('hidden');
-    E.camArea.classList.remove('hidden');
-    E.captureBtn.disabled = false;
-    E.captureHint.textContent = `Photo 1 of ${S.totalPhotos} — tap!`;
-    await api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:0, userId:S.userId });
+    S.socket.emit('retake', { code:S.code });
   }
 
   // ── LEAVE ────────────────────────────────────
-  async function leaveRoom(){
-    if(S.pollTimer) clearInterval(S.pollTimer);
+  function leaveRoom(){
     if(S.myStream) S.myStream.getTracks().forEach(t => t.stop());
-    api({ action:'leave', code:S.code, userId:S.userId });
+    if(S.socket) S.socket.disconnect();
     S.code = null; S.isHost = false; S.partnerConnected = false;
     S.currentPhoto = 0; S.photos = [null,null,null,null];
     S.capturing = false; S.sessionStarted = false;
@@ -385,18 +403,18 @@
   }
 
   // ── UTILS ────────────────────────────────────
-  function showPage(p){
-    $$('.page').forEach(x => x.classList.remove('active'));
-    $(`#${p}`).classList.add('active');
-  }
-  function showError(m){
-    E.error.textContent = m;
-    E.error.classList.remove('hidden');
-  }
+  function showPage(p){ $$('.page').forEach(x=>x.classList.remove('active')); $(`#${p}`).classList.add('active'); }
+  function showError(m){ E.error.textContent = m; E.error.classList.remove('hidden'); }
   function hideError(){ E.error.classList.add('hidden'); }
   function updatePartnerStatus(ok){
     E.partnerStatus.textContent = ok ? '✓ Connected!' : 'Waiting for partner...';
     E.partnerStatus.className = 'partner-status ' + (ok ? 'connected' : 'waiting');
+  }
+  function showToast(msg, dur = 4000){
+    if(!E.toast) return;
+    E.toast.textContent = msg;
+    E.toast.classList.add('show');
+    setTimeout(() => E.toast.classList.remove('show'), dur);
   }
   function setLoading(btn, text){ btn.disabled = true; btn.textContent = text; }
   function resetBtn(btn, text){ btn.disabled = false; btn.innerHTML = text + ' <span class="btn-arrow">▷</span>'; }
