@@ -60,11 +60,12 @@
 
     S.userId = 'u_' + Math.random().toString(36).slice(2,10);
 
-    // Auto-join from URL hash
+    // Auto-join from URL hash — prefill code, require tap to join
     const h = window.location.hash.slice(1);
     if(h && h.length >= 4){
       E.joinInput.value = h;
-      joinRoom();
+      // Don't auto-join — show a prompt instead
+      E.joinInput.focus();
     }
   }
 
@@ -157,7 +158,7 @@
 
     $$('.theme-card').forEach(c => c.classList.toggle('active', c.dataset.theme === S.theme));
 
-    // Start camera
+    // Start camera — with retry on failure
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode:'user', width:{ideal:640}, height:{ideal:480} },
@@ -167,7 +168,10 @@
       E.myVideo.srcObject = stream;
     } catch(e){
       console.warn('Camera denied:', e);
-      showError('Camera access is required. Please allow camera and refresh.');
+      // Show camera placeholder with retry button instead of error
+      if(E.partnerPlaceholder){
+        E.partnerPlaceholder.innerHTML = '<div style="text-align:center;padding:20px"><p style="color:#888;margin-bottom:12px">Camera access needed</p><button onclick="window.retryCamera()" class="btn btn-primary btn-small">Enable Camera</button></div>';
+      }
     }
 
     // Start polling IMMEDIATELY
@@ -403,3 +407,17 @@
 
   document.addEventListener('DOMContentLoaded', init);
 })();
+
+// Global camera retry (called from onclick)
+window.retryCamera = async function(){
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode:'user', width:{ideal:640}, height:{ideal:480} },
+      audio: false
+    });
+    document.querySelector('#myVideo').srcObject = stream;
+    document.querySelector('#partnerPlaceholder').innerHTML = '<span>waiting for partner...</span>';
+  } catch(e){
+    alert('Camera access is required. Please allow camera in your browser settings and refresh.');
+  }
+};
