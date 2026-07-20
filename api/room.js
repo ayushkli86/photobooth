@@ -112,6 +112,8 @@ module.exports = async (req, res) => {
         }
         return res.status(200).json({ ok: true, photos });
       }
+
+      case 'leave': {
         if (!code) return res.status(400).json({ error: 'Code required' });
         const room = await getRoom(code.toUpperCase());
         if (room) {
