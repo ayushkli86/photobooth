@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Photobooth 인생네컷 — Take Photos Together, Apart</title>
+  <meta name="description" content="Online Korean-style photobooth for long distance couples. Take photo strips together in real time.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎀</text></svg>">
+</head>
+<body>
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- LANDING PAGE                                -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div id="landing" class="page active">
+    <nav class="navbar">
+      <div class="nav-brand">
+        <span class="brand-icon">🎀</span>
+        <span class="brand-text">photobooth</span>
+        <span class="brand-kr">인생네컷</span>
+      </div>
+      <div class="nav-links">
+        <a href="#how" class="nav-link">How it works</a>
+        <a href="#faq" class="nav-link">FAQ</a>
+      </div>
+    </nav>
+
+    <main class="hero">
+      <div class="hero-content">
+        <div class="hero-badge">✦ online photobooth ✦</div>
+        <h1 class="hero-title">
+          Take photos<br>
+          <span class="highlight">together</span>, apart
+        </h1>
+        <p class="hero-subtitle">
+          A shared photo booth that fires the shot on both screens at once.<br>
+          Same countdown, same moment — even when you're far apart.
+        </p>
+
+        <div class="room-actions">
+          <button id="createRoomBtn" class="btn btn-primary btn-large">
+            Create a room <span class="btn-arrow">▷</span>
+          </button>
+          <div class="divider-text">or</div>
+          <div class="join-row">
+            <input id="joinCodeInput" type="text" class="code-input" placeholder="Enter code" maxlength="5" autocomplete="off" spellcheck="false">
+            <button id="joinRoomBtn" class="btn btn-secondary">
+              Join <span class="btn-arrow">▷</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="errorMessage" class="error-msg hidden"></div>
+      </div>
+
+      <div class="hero-visual">
+        <div class="strip-preview">
+          <div class="strip-frame">
+            <div class="strip-photo p1"><div class="placeholder-icon">📸</div></div>
+            <div class="strip-photo p2"><div class="placeholder-icon">💕</div></div>
+            <div class="strip-photo p3"><div class="placeholder-icon">✨</div></div>
+            <div class="strip-photo p4"><div class="placeholder-icon">🎀</div></div>
+            <div class="strip-label">photobooth · 인생네컷</div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <section id="how" class="section how-section">
+      <h2 class="section-title">How it works</h2>
+      <div class="steps">
+        <div class="step"><div class="step-num">01</div><h3>Create a room</h3><p>Pick a theme and open a room. You'll get a code.</p></div>
+        <div class="step"><div class="step-num">02</div><h3>Share the code</h3><p>Send the 5-letter code to your person. They join from anywhere.</p></div>
+        <div class="step"><div class="step-num">03</div><h3>Strike a pose</h3><p>A shared countdown fires the shot on both screens at once.</p></div>
+        <div class="step"><div class="step-num">04</div><h3>Get your strip</h3><p>4 photos, one strip. Download it as a keepsake.</p></div>
+      </div>
+    </section>
+
+    <section id="faq" class="section faq-section">
+      <h2 class="section-title">Questions people ask</h2>
+      <div class="faq-list">
+        <details class="faq-item"><summary>Is the photobooth free?</summary><p>Yes! Create a room, share the code, and shoot together for free. No account needed.</p></details>
+        <details class="faq-item"><summary>Do we need to install an app?</summary><p>No. It runs right in your browser on phone or laptop. Just allow camera access and you're in.</p></details>
+        <details class="faq-item"><summary>How does the sync work?</summary><p>One person creates a room and shares a code. A shared countdown fires on both screens at the same second, so each frame captures both of you.</p></details>
+        <details class="faq-item"><summary>What themes are available?</summary><p>Classic, Vintage, Meme, Laundry, Prison, Subway, Airplane, and Karaoke — 8 vibes to choose from.</p></details>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <div class="footer-brand"><span>🎀</span> photobooth · 인생네컷</div>
+      <p class="footer-tagline">made with love, for love</p>
+    </footer>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- BOOTH PAGE                                  -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div id="booth" class="page">
+    <nav class="navbar booth-nav">
+      <div class="nav-brand">
+        <span class="brand-icon">🎀</span>
+        <span class="brand-text">photobooth</span>
+      </div>
+      <div class="booth-info">
+        <span id="roomCodeDisplay" class="room-code-badge"></span>
+        <span id="partnerStatus" class="partner-status waiting">Waiting for partner...</span>
+      </div>
+      <button id="leaveRoomBtn" class="btn btn-ghost btn-small">Leave</button>
+    </nav>
+
+    <!-- Theme Selector (host only) -->
+    <div id="themeSelector" class="theme-selector">
+      <h3>Choose your room</h3>
+      <div class="theme-grid">
+        <button class="theme-card active" data-theme="classic"><div class="theme-preview classic-preview"></div><span class="theme-name">Classic</span><span class="theme-desc">clean & bright</span></button>
+        <button class="theme-card" data-theme="vintage"><div class="theme-preview vintage-preview"></div><span class="theme-name">Vintage</span><span class="theme-desc">1930s photo automat</span></button>
+        <button class="theme-card" data-theme="meme"><div class="theme-preview meme-preview"></div><span class="theme-name">Meme</span><span class="theme-desc">recreate the classics</span></button>
+        <button class="theme-card" data-theme="laundry"><div class="theme-preview laundry-preview"></div><span class="theme-name">Laundry</span><span class="theme-desc">late-night laundromat</span></button>
+        <button class="theme-card" data-theme="prison"><div class="theme-preview prison-preview"></div><span class="theme-name">Prison</span><span class="theme-desc">mugshot moment</span></button>
+        <button class="theme-card" data-theme="subway"><div class="theme-preview subway-preview"></div><span class="theme-name">Subway</span><span class="theme-desc">last train home</span></button>
+        <button class="theme-card" data-theme="airplane"><div class="theme-preview airplane-preview"></div><span class="theme-name">Airplane</span><span class="theme-desc">window-seat views</span></button>
+        <button class="theme-card" data-theme="karaoke"><div class="theme-preview karaoke-preview"></div><span class="theme-name">Karaoke</span><span class="theme-desc">noraebang neon</span></button>
+      </div>
+      <button id="startSessionBtn" class="btn btn-primary btn-large" style="margin-top:24px">
+        Start the session <span class="btn-arrow">▷</span>
+      </button>
+    </div>
+
+    <!-- Camera Area -->
+    <div id="cameraArea" class="camera-area hidden">
+      <div class="camera-layout">
+        <div class="camera-wrapper my-camera">
+          <div class="camera-label">You</div>
+          <video id="myVideo" autoplay playsinline muted></video>
+          <canvas id="myCanvas" class="hidden-canvas"></canvas>
+        </div>
+        <div class="camera-wrapper partner-camera">
+          <div class="camera-label">Them</div>
+          <div id="partnerPlaceholder" class="camera-placeholder">
+            <span>waiting for partner...</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="countdownOverlay" class="countdown-overlay hidden">
+        <div id="countdownNumber" class="countdown-number">3</div>
+      </div>
+      <div id="flashEffect" class="flash-effect"></div>
+
+      <div class="booth-controls">
+        <div id="photoProgress" class="photo-progress">
+          <div class="progress-dot active"></div>
+          <div class="progress-dot"></div>
+          <div class="progress-dot"></div>
+          <div class="progress-dot"></div>
+        </div>
+        <button id="captureBtn" class="btn btn-capture" disabled>
+          <div class="capture-ring"></div>
+        </button>
+        <div id="captureHint" class="capture-hint">Waiting for partner...</div>
+      </div>
+    </div>
+
+    <!-- Strip Result -->
+    <div id="stripResult" class="strip-result hidden">
+      <div class="strip-container">
+        <canvas id="stripCanvas"></canvas>
+      </div>
+      <div class="strip-actions">
+        <button id="downloadBtn" class="btn btn-primary">Download strip <span class="btn-arrow">↓</span></button>
+        <button id="retakeBtn" class="btn btn-secondary">Retake <span class="btn-arrow">↻</span></button>
+      </div>
+    </div>
+  </div>
+
+  <script src="assets.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
