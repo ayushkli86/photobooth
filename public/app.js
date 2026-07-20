@@ -1,23 +1,15 @@
 /**
- * PHOTOBHOOH v7 — Socket.io real-time (Render) + REST API (Vercel)
- *
- * Architecture:
- *   Vercel → REST API (room CRUD, Redis storage)
- *   Render → Socket.io (real-time sync, partner detection, WebRTC)
+ * PHOTOBHOOH v8 — Simple, reliable. Polling + optional Socket.io
  */
 (function(){
   'use strict';
-
-  // ── CONFIG ──────────────────────────────────
-  // CHANGE THIS to your Render URL after deployment!
-  const SIGNALING_URL = 'https://photobooth-signaling.onrender.com';
 
   const S = {
     code: null, userId: null, theme: 'classic', isHost: false,
     partnerConnected: false, currentPhoto: 0, totalPhotos: 4,
     photos: [null,null,null,null], myStream: null,
     capturing: false, sessionStarted: false,
-    socket: null
+    socket: null, pollTimer: null
   };
 
   const $ = s => document.querySelector(s);
@@ -56,6 +48,9 @@
       $$('.theme-card').forEach(x => x.classList.remove('active'));
       c.classList.add('active');
       S.theme = c.dataset.theme;
+      if(S.socket?.connected && S.isHost){
+        S.socket.emit('set-theme', { code: S.code, theme: S.theme });
+      }
     }));
 
     S.userId = 'u_' + Math.random().toString(36).slice(2,10);
@@ -98,102 +93,53 @@
     }
   }
 
-  // ── CONNECT SOCKET.IO (Render) ──────────────
-  function connectSocket(){
-    return new Promise((resolve) => {
-      if(typeof io === 'undefined'){
-        console.error('Socket.io not loaded');
-        resolve(false);
-        return;
-      }
-      try {
-        S.socket = io(SIGNALING_URL, {
-          transports: ['websocket', 'polling'],
-          reconnection: true,
-          reconnectionAttempts: 10,
-          reconnectionDelay: 1000,
-          timeout: 8000,
-        });
+  // ── SOCKET.IO (optional enhancement) ─────────
+  function tryConnectSocket(){
+    if(typeof io === 'undefined') return;
+    try {
+      S.socket = io('https://photobooth-signaling.onrender.com', {
+        transports: ['websocket', 'polling'],
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 2000,
+        timeout: 5000,
+      });
 
-        S.socket.on('connect', () => {
-          console.log('[ws] Connected to signaling server:', S.socket.id);
-          resolve(true);
-        });
+      S.socket.on('connect', () => {
+        console.log('[ws] Connected to signaling');
+        if(S.code){
+          if(S.isHost) S.socket.emit('create-room', { code: S.code, userId: S.userId });
+          else S.socket.emit('join-room', { code: S.code, userId: S.userId });
+        }
+      });
 
-        S.socket.on('connect_error', (err) => {
-          console.warn('[ws] Connection error:', err.message);
-          resolve(false); // Resolve anyway — app can work with polling fallback
-        });
+      S.socket.on('partner-joined', () => { if(!S.partnerConnected) partnerConnected(); });
+      S.socket.on('partner-left', () => { S.partnerConnected=false; updatePartnerStatus(false); showToast('Partner disconnected'); E.captureBtn.disabled=true; if(E.themePartnerStatus) E.themePartnerStatus.textContent='Partner left. Waiting...'; E.captureHint.textContent='Partner disconnected...'; });
+      S.socket.on('session-started', ({ theme }) => { S.sessionStarted=true; if(theme) S.theme=theme; E.themeSel.classList.add('hidden'); E.camArea.classList.remove('hidden'); E.captureBtn.disabled=false; E.captureHint.textContent='Session started! Tap to take a photo.'; });
+      S.socket.on('countdown', ({ photoIndex }) => { if(!S.capturing) startCountdown(photoIndex); });
+      S.socket.on('retake', () => { doRetake(); });
+      S.socket.on('theme-changed', ({ theme }) => { S.theme=theme; $$('.theme-card').forEach(c=>c.classList.toggle('active',c.dataset.theme===theme)); });
+    } catch(e){ console.warn('Socket.io unavailable'); }
+  }
 
-        // ── REAL-TIME EVENTS ──────────────────────
-        S.socket.on('partner-joined', () => {
-          partnerConnected();
-        });
-
-        S.socket.on('partner-left', () => {
-          S.partnerConnected = false;
-          updatePartnerStatus(false);
-          showToast('Partner disconnected');
-          E.captureBtn.disabled = true;
-          if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Partner left. Waiting...';
-          E.captureHint.textContent = 'Partner disconnected...';
-        });
-
-        S.socket.on('session-started', ({ theme }) => {
-          S.sessionStarted = true;
-          if(theme) S.theme = theme;
-          E.themeSel.classList.add('hidden');
-          E.camArea.classList.remove('hidden');
-          E.captureBtn.disabled = false;
-          E.captureHint.textContent = 'Session started! Tap to take a photo.';
-        });
-
-        S.socket.on('countdown', ({ photoIndex }) => {
-          if(!S.capturing) startCountdown(photoIndex);
-        });
-
-        S.socket.on('retake', () => { doRetake(); });
-
-        S.socket.on('strip-done', () => {
-          // Partner finished their strip
-        });
-
-        // ── THEME CHANGED (guest) ────────────────
-        S.socket.on('theme-changed', ({ theme }) => {
-          S.theme = theme;
-          $$('.theme-card').forEach(c => c.classList.toggle('active', c.dataset.theme === theme));
-        });
-
-        setTimeout(() => resolve(false), 5000); // Timeout
-
-      } catch(e){
-        console.error('Socket error:', e);
-        resolve(false);
-      }
-    });
+  function emit(event, data){
+    if(S.socket?.connected) S.socket.emit(event, data);
   }
 
   // ── CREATE ROOM ──────────────────────────────
   function createRoom(){
     hideError();
     setLoading(E.createBtn, 'Creating...');
-    requestCamera().then(camOk => {
+    requestCamera().then(() => {
       return api({ action:'create', theme: S.theme, userId: S.userId });
-    }).then(async (res) => {
+    }).then(res => {
       if(!res.ok) throw new Error(res.error);
-      S.code = res.code;
-      S.isHost = true;
-
-      // Connect to signaling server
-      await connectSocket();
-      if(S.socket?.connected){
-        S.socket.emit('create-room', { code: S.code, userId: S.userId }, () => {});
-        S.socket.emit('set-theme', { code: S.code, theme: S.theme });
-      }
-
+      S.code = res.code; S.isHost = true;
+      tryConnectSocket();
       enterBooth();
+      startPolling();
     }).catch(e => {
-      showError(e.message || 'Failed to create room');
+      showError(e.message || 'Failed');
       resetBtn(E.createBtn, 'Create a room');
     });
   }
@@ -201,26 +147,19 @@
   // ── JOIN ROOM ────────────────────────────────
   function joinRoom(){
     const code = E.joinInput.value.trim().toUpperCase();
-    if(!code || code.length < 4){ showError('Enter a valid room code'); return; }
+    if(!code || code.length < 4){ showError('Enter a valid code'); return; }
     hideError();
     setLoading(E.joinBtn, 'Joining...');
-    requestCamera().then(camOk => {
+    requestCamera().then(() => {
       return api({ action:'join', code, userId: S.userId });
-    }).then(async (res) => {
+    }).then(res => {
       if(!res.ok) throw new Error(res.error);
-      S.code = res.code;
-      S.theme = res.room.theme || 'classic';
-      S.isHost = false;
-
-      // Connect to signaling server
-      await connectSocket();
-      if(S.socket?.connected){
-        S.socket.emit('join-room', { code: S.code, userId: S.userId }, () => {});
-      }
-
+      S.code = res.code; S.theme = res.room.theme || 'classic'; S.isHost = false;
+      tryConnectSocket();
       enterBooth();
+      startPolling();
     }).catch(e => {
-      showError(e.message || 'Could not join room');
+      showError(e.message || 'Room not found');
       resetBtn(E.joinBtn, 'Join');
     });
   }
@@ -235,47 +174,32 @@
       E.themeSel.style.display = '';
       E.camArea.classList.add('hidden');
       if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Waiting for partner...';
-      if(E.startBtn){
-        E.startBtn.disabled = true;
-        E.startBtn.innerHTML = 'Waiting for partner... <span class="btn-arrow">▷</span>';
-      }
+      if(E.startBtn){ E.startBtn.disabled = true; E.startBtn.innerHTML = 'Waiting for partner... <span class="btn-arrow">▷</span>'; }
       updatePartnerStatus(false);
+      E.captureHint.textContent = 'Share the code with your partner';
     } else {
       E.themeSel.style.display = 'none';
       E.camArea.classList.remove('hidden');
-      E.captureHint.textContent = 'Connected! Waiting for host to start...';
-      updatePartnerStatus(true);
+      E.captureHint.textContent = 'Connecting...';
+      updatePartnerStatus(false);
     }
 
     $$('.theme-card').forEach(c => c.classList.toggle('active', c.dataset.theme === S.theme));
-
-    // Handle card click to send theme change to signaling
-    $$('.theme-card').forEach(c => {
-      c.addEventListener('click', () => {
-        if(S.socket?.connected && S.isHost){
-          S.socket.emit('set-theme', { code: S.code, theme: c.dataset.theme });
-        }
-      });
-    });
 
     if(!S.myStream && E.partnerPlaceholder){
       E.partnerPlaceholder.innerHTML = '<div style="text-align:center;padding:20px"><p style="color:#888;margin-bottom:12px">Camera needed</p><button onclick="window.retryCamera()" class="btn btn-primary btn-small">Enable Camera</button></div>';
     }
 
-    // Fallback: start polling if Socket.io didn't connect
-    if(!S.socket?.connected){
-      console.log('Socket.io not connected, starting polling fallback');
-      startPolling();
-    }
+    // Button states
+    resetBtn(E.createBtn, 'Create a room');
+    resetBtn(E.joinBtn, 'Join');
   }
 
-  // ── POLLING FALLBACK (if Socket.io fails) ────
-  let pollTimer = null;
-
+  // ── POLLING (always on — reliable) ──────────
   function startPolling(){
-    if(pollTimer) clearInterval(pollTimer);
+    if(S.pollTimer) clearInterval(S.pollTimer);
     pollRoom();
-    pollTimer = setInterval(pollRoom, 3000);
+    S.pollTimer = setInterval(pollRoom, 3000);
   }
 
   async function pollRoom(){
@@ -286,7 +210,30 @@
       const room = res.room;
       const wasConnected = S.partnerConnected;
       S.partnerConnected = !!room.guest;
-      if(S.partnerConnected && !wasConnected) partnerConnected();
+
+      // Partner joined
+      if(S.partnerConnected && !wasConnected){
+        partnerConnected();
+      }
+
+      // Partner left
+      if(!S.partnerConnected && wasConnected){
+        S.partnerConnected = false;
+        updatePartnerStatus(false);
+        showToast('Partner disconnected');
+        E.captureBtn.disabled = true;
+        if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Partner left. Waiting...';
+        E.captureHint.textContent = 'Partner disconnected...';
+      }
+
+      // Sync session state (for guest)
+      if(room.state === 'shooting' && room.currentPhoto !== undefined && !S.sessionStarted && !S.isHost){
+        S.sessionStarted = true;
+        S.currentPhoto = room.currentPhoto || 0;
+        E.camArea.classList.remove('hidden');
+        E.captureBtn.disabled = false;
+        E.captureHint.textContent = `Photo ${S.currentPhoto + 1} of ${S.totalPhotos}`;
+      }
     } catch(e){}
   }
 
@@ -299,13 +246,10 @@
 
     if(S.isHost){
       if(E.themePartnerStatus) E.themePartnerStatus.innerHTML = '<span class="status-connected">✓ Partner connected!</span>';
-      if(E.startBtn){
-        E.startBtn.disabled = false;
-        E.startBtn.innerHTML = 'Start the session <span class="btn-arrow">▷</span>';
-      }
+      if(E.startBtn){ E.startBtn.disabled = false; E.startBtn.innerHTML = 'Start the session <span class="btn-arrow">▷</span>'; }
       E.captureHint.textContent = 'Partner joined! Click start.';
     } else {
-      E.captureHint.textContent = 'Connected! Waiting for host to start...';
+      E.captureHint.textContent = 'Connected! Host will start the session...';
     }
   }
 
@@ -314,13 +258,8 @@
     E.themeSel.classList.add('hidden');
     E.camArea.classList.remove('hidden');
     S.sessionStarted = true;
-
-    if(S.socket?.connected){
-      S.socket.emit('start-session', { code: S.code, theme: S.theme });
-    } else {
-      api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:0, userId:S.userId });
-    }
-
+    api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:0, userId:S.userId });
+    emit('start-session', { code: S.code, theme: S.theme });
     E.captureBtn.disabled = false;
     E.captureHint.textContent = 'Tap to take the first photo!';
   }
@@ -328,12 +267,8 @@
   // ── CAPTURE ──────────────────────────────────
   function capturePhoto(){
     if(S.capturing || !S.partnerConnected || S.currentPhoto >= S.totalPhotos) return;
-    S.capturing = true;
-    E.captureBtn.disabled = true;
-
-    if(S.socket?.connected){
-      S.socket.emit('start-countdown', { code: S.code, photoIndex: S.currentPhoto });
-    }
+    S.capturing = true; E.captureBtn.disabled = true;
+    emit('start-countdown', { code: S.code, photoIndex: S.currentPhoto });
     startCountdown(S.currentPhoto);
   }
 
@@ -341,18 +276,13 @@
     let count = 3;
     E.countdown.classList.remove('hidden');
     E.countNum.textContent = count;
-    const animate = () => {
-      E.countNum.style.animation = 'none';
-      void E.countNum.offsetWidth;
-      E.countNum.style.animation = 'countdown-pulse 0.5s ease-out';
-    };
+    const animate = () => { E.countNum.style.animation='none'; void E.countNum.offsetWidth; E.countNum.style.animation='countdown-pulse 0.5s ease-out'; };
     animate();
     const iv = setInterval(() => {
       count--;
       if(count > 0){ E.countNum.textContent = count; animate(); }
       else {
-        clearInterval(iv);
-        E.countdown.classList.add('hidden');
+        clearInterval(iv); E.countdown.classList.add('hidden');
         E.flash.classList.add('active');
         setTimeout(() => E.flash.classList.remove('active'), 150);
         doCapture(idx);
@@ -367,50 +297,25 @@
     ctx.translate(c.width, 0); ctx.scale(-1, 1);
     ctx.drawImage(v, 0, 0, c.width, c.height);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-
     const config = Assets.themes[S.theme];
-    if(config && config.filter !== 'none'){
-      ctx.filter = config.filter; ctx.drawImage(c, 0, 0); ctx.filter = 'none';
-    }
-
+    if(config && config.filter !== 'none'){ ctx.filter = config.filter; ctx.drawImage(c, 0, 0); ctx.filter = 'none'; }
     S.photos[idx] = c.toDataURL('image/jpeg', 0.85);
     updateProgress(idx);
-    S.currentPhoto = idx + 1;
-    S.capturing = false;
-
-    if(S.socket?.connected){
-      S.socket.emit('photo-captured', { code: S.code, photoIndex: idx });
-    }
-
-    if(S.currentPhoto >= S.totalPhotos){
-      if(S.socket?.connected) S.socket.emit('strip-done', { code: S.code });
-      setTimeout(showStrip, 800);
-    } else {
-      E.captureBtn.disabled = false;
-      E.captureHint.textContent = `Photo ${S.currentPhoto + 1} of ${S.totalPhotos} — tap!`;
-    }
+    S.currentPhoto = idx + 1; S.capturing = false;
+    emit('photo-captured', { code: S.code, photoIndex: idx });
+    if(S.currentPhoto >= S.totalPhotos){ emit('strip-done', { code: S.code }); setTimeout(showStrip, 800); }
+    else { E.captureBtn.disabled = false; E.captureHint.textContent = `Photo ${S.currentPhoto + 1} of ${S.totalPhotos} — tap!`; }
   }
 
   function updateProgress(idx){
     const dots = E.progress.querySelectorAll('.progress-dot');
-    dots.forEach((d, i) => {
-      d.classList.remove('done', 'active');
-      if(i <= idx) d.classList.add('done');
-      else if(i === idx + 1) d.classList.add('active');
-    });
+    dots.forEach((d, i) => { d.classList.remove('done','active'); if(i<=idx) d.classList.add('done'); else if(i===idx+1) d.classList.add('active'); });
   }
 
-  // ── STRIP ────────────────────────────────────
   function showStrip(){
-    E.camArea.classList.add('hidden');
-    E.stripResult.classList.remove('hidden');
-    E.captureBtn.disabled = true;
-    const strip = Assets.generateStrip(S.photos, S.theme, {
-      pw:280, ph:350, pad:16, gap:10, showLabel:true,
-      labelText:'photobooth · 인생네컷', showStickers:true
-    });
-    E.stripCanvas.width = strip.width;
-    E.stripCanvas.height = strip.height;
+    E.camArea.classList.add('hidden'); E.stripResult.classList.remove('hidden'); E.captureBtn.disabled = true;
+    const strip = Assets.generateStrip(S.photos, S.theme, { pw:280, ph:350, pad:16, gap:10, showLabel:true, labelText:'photobooth · 인생네컷', showStickers:true });
+    E.stripCanvas.width = strip.width; E.stripCanvas.height = strip.height;
     E.stripCanvas.getContext('2d').drawImage(strip, 0, 0);
   }
 
@@ -422,61 +327,43 @@
   }
 
   function retake(){
-    S.currentPhoto = 0; S.photos = [null,null,null,null]; S.capturing = false;
-    S.sessionStarted = true;
-    if(S.socket?.connected) S.socket.emit('retake', { code: S.code });
+    S.currentPhoto = 0; S.photos = [null,null,null,null]; S.capturing = false; S.sessionStarted = true;
+    emit('retake', { code: S.code });
     doRetake();
   }
 
   function doRetake(){
-    $$('.progress-dot').forEach((d, i) => { d.classList.remove('done','active'); if(i===0) d.classList.add('active'); });
-    E.stripResult.classList.add('hidden');
-    E.camArea.classList.remove('hidden');
-    E.captureBtn.disabled = false;
-    E.captureHint.textContent = `Photo 1 of ${S.totalPhotos} — tap!`;
+    $$('.progress-dot').forEach((d,i)=>{ d.classList.remove('done','active'); if(i===0) d.classList.add('active'); });
+    E.stripResult.classList.add('hidden'); E.camArea.classList.remove('hidden');
+    E.captureBtn.disabled = false; E.captureHint.textContent = `Photo 1 of ${S.totalPhotos} — tap!`;
   }
 
-  // ── LEAVE ────────────────────────────────────
   function leaveRoom(){
-    if(pollTimer) clearInterval(pollTimer);
+    if(S.pollTimer) clearInterval(S.pollTimer);
     if(S.socket) S.socket.disconnect();
-    if(S.myStream) S.myStream.getTracks().forEach(t => t.stop());
+    if(S.myStream) S.myStream.getTracks().forEach(t=>t.stop());
     api({ action:'leave', code:S.code, userId:S.userId });
-    S.code = null; S.isHost = false; S.partnerConnected = false;
-    S.currentPhoto = 0; S.photos = [null,null,null,null];
-    S.capturing = false; S.sessionStarted = false;
+    S.code=null; S.isHost=false; S.partnerConnected=false; S.currentPhoto=0; S.photos=[null,null,null,null]; S.capturing=false; S.sessionStarted=false;
     showPage('landing');
     window.history.replaceState(null, '', window.location.pathname);
-    resetBtn(E.createBtn, 'Create a room');
-    resetBtn(E.joinBtn, 'Join');
+    resetBtn(E.createBtn, 'Create a room'); resetBtn(E.joinBtn, 'Join');
   }
 
-  // ── UTILS ────────────────────────────────────
   function showPage(p){ $$('.page').forEach(x=>x.classList.remove('active')); $(`#${p}`).classList.add('active'); }
-  function showError(m){ E.error.textContent = m; E.error.classList.remove('hidden'); }
+  function showError(m){ E.error.textContent=m; E.error.classList.remove('hidden'); }
   function hideError(){ E.error.classList.add('hidden'); }
-  function updatePartnerStatus(ok){
-    E.partnerStatus.textContent = ok ? '✓ Connected!' : 'Waiting for partner...';
-    E.partnerStatus.className = 'partner-status ' + (ok ? 'connected' : 'waiting');
-  }
-  function showToast(msg, dur = 4000){
-    if(!E.toast) return;
-    E.toast.textContent = msg; E.toast.classList.add('show');
-    setTimeout(() => E.toast.classList.remove('show'), dur);
-  }
-  function setLoading(btn, text){ btn.disabled = true; btn.textContent = text; }
-  function resetBtn(btn, text){ btn.disabled = false; btn.innerHTML = text + ' <span class="btn-arrow">▷</span>'; }
+  function updatePartnerStatus(ok){ E.partnerStatus.textContent=ok?'✓ Connected!':'Waiting for partner...'; E.partnerStatus.className='partner-status '+(ok?'connected':'waiting'); }
+  function showToast(msg,dur=4000){ if(!E.toast) return; E.toast.textContent=msg; E.toast.classList.add('show'); setTimeout(()=>E.toast.classList.remove('show'),dur); }
+  function setLoading(btn,text){ btn.disabled=true; btn.textContent=text; }
+  function resetBtn(btn,text){ btn.disabled=false; btn.innerHTML=text+' <span class="btn-arrow">▷</span>'; }
 
   document.addEventListener('DOMContentLoaded', init);
 })();
 
 window.retryCamera = async function(){
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode:'user', width:{ideal:640}, height:{ideal:480} },
-      audio: false
-    });
+    const stream = await navigator.mediaDevices.getUserMedia({ video:{facingMode:'user',width:{ideal:640},height:{ideal:480}}, audio:false });
     document.querySelector('#myVideo').srcObject = stream;
     document.querySelector('#partnerPlaceholder').innerHTML = '<span>waiting for partner...</span>';
-  } catch(e){ alert('Camera access required. Allow camera in browser settings.'); }
+  } catch(e){ alert('Camera access required.'); }
 };
