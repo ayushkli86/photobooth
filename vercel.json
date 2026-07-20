@@ -4,13 +4,8 @@
   "outputDirectory": "public",
   "installCommand": "npm install --omit=dev",
   "framework": null,
-  "functions": {
-    "api/ws.js": {
-      "maxDuration": 300
-    }
-  },
   "rewrites": [
-    { "source": "/api/ws", "destination": "/api/ws" }
+    { "source": "/api/(.*)", "destination": "/api/$1" }
   ],
   "headers": [
     {
