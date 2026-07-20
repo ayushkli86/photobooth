@@ -45,6 +45,7 @@
   };
 
   function init(){
+    console.log('[pb] Init', { userId: S.userId });
     E.createBtn.addEventListener('click', createRoom);
     E.joinBtn.addEventListener('click', joinRoom);
     E.joinInput.addEventListener('keypress', e => { if(e.key==='Enter') joinRoom(); });
@@ -67,17 +68,20 @@
   }
 
   async function requestCamera(){
+    console.log('[pb] Requesting camera...');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video:{facingMode:'user',width:{ideal:640},height:{ideal:480}} });
       S.myStream = stream;
       E.myVideo.srcObject = stream;
+      console.log('[pb] Camera OK');
       return true;
-    } catch(e){ console.warn('Camera denied:', e); return false; }
+    } catch(e){ console.warn('[pb] Camera denied:', e.message); return false; }
   }
 
   async function api(body, retries = 2){
     for(let attempt = 0; attempt <= retries; attempt++){
       try {
+        console.log('[pb] API call:', body.action, attempt?'retry '+attempt:'');
         const c = new AbortController();
         const t = setTimeout(() => c.abort(), 15000);
         const r = await fetch(API, {
@@ -85,19 +89,25 @@
           body: JSON.stringify(body), signal: c.signal
         });
         clearTimeout(t);
-        return await r.json();
+        const data = await r.json();
+        console.log('[pb] API response:', body.action, data.ok ? 'OK' : 'FAIL', data.error||'');
+        return data;
       } catch(e) {
-        if(attempt === retries) return { ok: false, error: 'Network error' };
+        console.warn('[pb] API error:', e.message);
+        if(attempt === retries) return { ok: false, error: 'Network error: '+e.message };
         await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
       }
     }
   }
 
-  // ── CREATE ROOM ──────────────────────────────
   function createRoom(){
+    console.log('[pb] Create room clicked');
     hideError();
     setLoading(E.createBtn, 'Creating...');
-    requestCamera().then(() => api({ action:'create', theme: S.theme, userId: S.userId }))
+    requestCamera().then(camOk => {
+      console.log('[pb] Camera obtained:', camOk);
+      return api({ action:'create', theme: S.theme, userId: S.userId });
+    })
     .then(res => {
       if(!res.ok) throw new Error(res.error);
       S.code = res.code; S.isHost = true;
@@ -111,9 +121,13 @@
   function joinRoom(){
     const code = E.joinInput.value.trim().toUpperCase();
     if(!code||code.length<4){ showError('Enter a valid code'); return; }
+    console.log('[pb] Join room:', code);
     hideError();
     setLoading(E.joinBtn, 'Joining...');
-    requestCamera().then(() => api({ action:'join', code, userId: S.userId }))
+    requestCamera().then(camOk => {
+      console.log('[pb] Camera obtained:', camOk);
+      return api({ action:'join', code, userId: S.userId });
+    })
     .then(res => {
       if(!res.ok) throw new Error(res.error);
       S.code = res.code; S.theme = res.room.theme||'classic'; S.isHost = false;
@@ -126,6 +140,7 @@
 
   // ── ENTER BOOTH ──────────────────────────────
   function enterBooth(){
+    console.log('[pb] Enter booth:', S.code, 'host:', S.isHost);
     showPage('booth');
     E.codeDisplay.textContent = S.code;
     window.history.replaceState(null, '', '#' + S.code);
@@ -154,9 +169,9 @@
   // ── POLLING ──────────────────────────────────
   function startPolling(){
     if(S.pollTimer) clearInterval(S.pollTimer);
+    console.log('[pb] Polling started');
     pollRoom();
     S.pollTimer = setInterval(pollRoom, 3000);
-    // Also check for partner photos
     if(S.isHost){
       S.photoCheckTimer = setInterval(checkPartnerPhotos, 3000);
     }
@@ -166,7 +181,7 @@
     if(!S.code) return;
     try {
       const res = await api({ action:'get', code:S.code });
-      if(!res.ok) return;
+      if(!res.ok){ console.warn('[pb] Poll failed:', res.error); return; }
       const room = res.room;
       const was = S.partnerConnected;
       S.partnerConnected = !!room.guest;
@@ -268,6 +283,7 @@
   }
 
   function doCapture(idx){
+    console.log('[pb] doCapture:', idx);
     const v = E.myVideo, c = E.myCanvas;
     c.width = v.videoWidth || 640; c.height = v.videoHeight || 480;
     const ctx = c.getContext('2d');
