@@ -1,14 +1,12 @@
 /**
- * PHOTOBHOOH — Main Application (v2 — all bugs fixed)
+ * PHOTOBHOOH — Main Application (v3 — connection visibility fixed)
  *
- * Fixes:
- * - White page on join: guest goes straight to camera
- * - Partner detection: both sides poll immediately
- * - No image saving to Redis (too large)
- * - Retry logic for cold starts
- * - Loading states
- * - Reduced polling (3s)
- * - Proper error messages
+ * All v2 fixes plus:
+ * - Big toast notification when partner connects
+ * - Partner status visible on theme selector page
+ * - Mobile-friendly status indicators
+ * - Host sees clear "Partner joined!" + can start session
+ * - Guest sees big "Connected!" indicator
  */
 (function(){
   'use strict';
@@ -37,7 +35,10 @@
     flash: $('#flashEffect'), captureBtn: $('#captureBtn'),
     captureHint: $('#captureHint'), progress: $('#photoProgress'),
     stripResult: $('#stripResult'), stripCanvas: $('#stripCanvas'),
-    downloadBtn: $('#downloadBtn'), retakeBtn: $('#retakeBtn')
+    downloadBtn: $('#downloadBtn'), retakeBtn: $('#retakeBtn'),
+    // NEW elements
+    toast: $('#toast'),
+    themePartnerStatus: $('#themePartnerStatus')
   };
 
   // ── INIT ─────────────────────────────────────
@@ -67,6 +68,14 @@
     }
   }
 
+  // ── TOAST NOTIFICATION ───────────────────────
+  function showToast(message, duration = 4000){
+    if(!E.toast) return;
+    E.toast.textContent = message;
+    E.toast.classList.add('show');
+    setTimeout(() => E.toast.classList.remove('show'), duration);
+  }
+
   // ── API HELPER with retry ────────────────────
   async function api(body, retries = 2){
     for(let attempt = 0; attempt <= retries; attempt++){
@@ -80,14 +89,12 @@
           signal: controller.signal
         });
         clearTimeout(timeout);
-        const data = await r.json();
-        return data;
+        return await r.json();
       } catch(e) {
         if(attempt === retries) {
-          console.error('API failed after ' + (retries+1) + ' attempts:', e);
-          return { ok: false, error: 'Network error. Please try again.' };
+          console.error('API failed:', e);
+          return { ok: false, error: 'Network error' };
         }
-        // Wait before retry (backoff)
         await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
       }
     }
@@ -134,13 +141,18 @@
     E.codeDisplay.textContent = S.code;
     window.history.replaceState(null, '', '#' + S.code);
 
-    // Host: show theme selector. Guest: go straight to camera
     if(S.isHost){
+      // Host: show theme selector, hide camera for now
       E.themeSel.style.display = '';
       E.camArea.classList.add('hidden');
+      // Show partner status on theme selector
+      if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Waiting for partner to join...';
+      if(E.startBtn) E.startBtn.disabled = true;
     } else {
+      // Guest: skip theme selector, go straight to camera
       E.themeSel.style.display = 'none';
       E.camArea.classList.remove('hidden');
+      E.captureHint.textContent = 'Connecting...';
     }
 
     $$('.theme-card').forEach(c => c.classList.toggle('active', c.dataset.theme === S.theme));
@@ -154,11 +166,11 @@
       S.myStream = stream;
       E.myVideo.srcObject = stream;
     } catch(e){
-      console.warn('Camera access denied:', e);
+      console.warn('Camera denied:', e);
       showError('Camera access is required. Please allow camera and refresh.');
     }
 
-    // Start polling IMMEDIATELY for both host and guest
+    // Start polling IMMEDIATELY
     startPolling();
   }
 
@@ -175,8 +187,8 @@
   // ── POLLING ──────────────────────────────────
   function startPolling(){
     if(S.pollTimer) clearInterval(S.pollTimer);
-    pollRoom(); // Immediate first poll
-    S.pollTimer = setInterval(pollRoom, 3000); // Every 3s
+    pollRoom();
+    S.pollTimer = setInterval(pollRoom, 3000);
   }
 
   async function pollRoom(){
@@ -189,17 +201,41 @@
       // Partner status
       const wasConnected = S.partnerConnected;
       S.partnerConnected = !!room.guest;
-      if(S.partnerConnected !== wasConnected){
-        updatePartnerStatus(S.partnerConnected);
-        if(S.partnerConnected){
+
+      if(S.partnerConnected && !wasConnected){
+        // PARTNER JUST JOINED — big notification!
+        updatePartnerStatus(true);
+        showToast('🎀 Partner connected!');
+
+        if(S.isHost){
+          // Host: enable start button
+          if(E.themePartnerStatus) E.themePartnerStatus.innerHTML = '<span class="status-connected">✓ Partner connected!</span>';
+          if(E.startBtn){
+            E.startBtn.disabled = false;
+            E.startBtn.innerHTML = 'Start the session <span class="btn-arrow">▷</span>';
+          }
+          // If host already started session, enable capture
+          if(S.sessionStarted){
+            E.captureBtn.disabled = false;
+            E.captureHint.textContent = 'Partner joined! Tap to take a photo.';
+          }
+        } else {
+          // Guest: show connected status
           E.captureBtn.disabled = false;
-          E.captureHint.textContent = S.isHost
-            ? 'Partner joined! Tap to start.'
-            : 'Connected! Host will start the session.';
+          E.captureHint.textContent = 'Connected! Tap to take a photo.';
         }
       }
 
-      // Sync state from host
+      // Host: detect if partner left
+      if(!S.partnerConnected && wasConnected){
+        updatePartnerStatus(false);
+        showToast('Partner disconnected');
+        E.captureBtn.disabled = true;
+        if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Partner left. Waiting for new partner...';
+        E.captureHint.textContent = 'Partner disconnected...';
+      }
+
+      // Guest: sync state from host
       if(room.state === 'shooting' && !S.sessionStarted && !S.isHost){
         S.sessionStarted = true;
         S.currentPhoto = room.currentPhoto || 0;
@@ -208,13 +244,8 @@
         E.captureHint.textContent = `Photo ${S.currentPhoto + 1} of ${S.totalPhotos}`;
       }
 
-      // Guest: trigger countdown when state changes to shooting
-      if(room.state === 'shooting' && room.currentPhoto === S.currentPhoto && !S.capturing && !S.isHost && S.sessionStarted){
-        // Host triggered a capture
-      }
-
     } catch(e){
-      // Silent fail — polling should not show errors
+      // Silent fail for polling
     }
   }
 
@@ -263,13 +294,11 @@
     c.height = v.videoHeight || 480;
     const ctx = c.getContext('2d');
 
-    // Mirror selfie
     ctx.translate(c.width, 0);
     ctx.scale(-1, 1);
     ctx.drawImage(v, 0, 0, c.width, c.height);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-    // Apply theme filter
     const config = Assets.themes[S.theme];
     if(config && config.filter !== 'none'){
       ctx.filter = config.filter;
@@ -277,14 +306,11 @@
       ctx.filter = 'none';
     }
 
-    const dataUrl = c.toDataURL('image/jpeg', 0.85);
-    S.photos[idx] = dataUrl;
-
+    S.photos[idx] = c.toDataURL('image/jpeg', 0.85);
     updateProgress(idx);
     S.currentPhoto = idx + 1;
     S.capturing = false;
 
-    // Update state on server (without image data!)
     api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:S.currentPhoto, userId:S.userId });
 
     if(S.currentPhoto >= S.totalPhotos){
@@ -292,7 +318,7 @@
       setTimeout(showStrip, 800);
     } else {
       E.captureBtn.disabled = false;
-      E.captureHint.textContent = `Photo ${S.currentPhoto + 1} of ${S.totalPhotos}`;
+      E.captureHint.textContent = `Photo ${S.currentPhoto + 1} of ${S.totalPhotos} — tap!`;
     }
   }
 
@@ -340,7 +366,7 @@
     E.stripResult.classList.add('hidden');
     E.camArea.classList.remove('hidden');
     E.captureBtn.disabled = false;
-    E.captureHint.textContent = `Photo 1 of ${S.totalPhotos}`;
+    E.captureHint.textContent = `Photo 1 of ${S.totalPhotos} — tap!`;
     await api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:0, userId:S.userId });
   }
 
@@ -348,7 +374,7 @@
   async function leaveRoom(){
     if(S.pollTimer) clearInterval(S.pollTimer);
     if(S.myStream) S.myStream.getTracks().forEach(t => t.stop());
-    api({ action:'leave', code:S.code, userId:S.userId }); // fire and forget
+    api({ action:'leave', code:S.code, userId:S.userId });
     S.code = null; S.isHost = false; S.partnerConnected = false;
     S.currentPhoto = 0; S.photos = [null,null,null,null];
     S.capturing = false; S.sessionStarted = false;
@@ -369,17 +395,11 @@
   }
   function hideError(){ E.error.classList.add('hidden'); }
   function updatePartnerStatus(ok){
-    E.partnerStatus.textContent = ok ? 'Connected!' : 'Waiting for partner...';
+    E.partnerStatus.textContent = ok ? '✓ Connected!' : 'Waiting for partner...';
     E.partnerStatus.className = 'partner-status ' + (ok ? 'connected' : 'waiting');
   }
-  function setLoading(btn, text){
-    btn.disabled = true;
-    btn.textContent = text;
-  }
-  function resetBtn(btn, text){
-    btn.disabled = false;
-    btn.innerHTML = text + ' <span class="btn-arrow">▷</span>';
-  }
+  function setLoading(btn, text){ btn.disabled = true; btn.textContent = text; }
+  function resetBtn(btn, text){ btn.disabled = false; btn.innerHTML = text + ' <span class="btn-arrow">▷</span>'; }
 
   document.addEventListener('DOMContentLoaded', init);
 })();

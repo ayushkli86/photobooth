@@ -124,8 +124,9 @@
         <button class="theme-card" data-theme="airplane"><div class="theme-preview airplane-preview"></div><span class="theme-name">Airplane</span><span class="theme-desc">window-seat views</span></button>
         <button class="theme-card" data-theme="karaoke"><div class="theme-preview karaoke-preview"></div><span class="theme-name">Karaoke</span><span class="theme-desc">noraebang neon</span></button>
       </div>
-      <button id="startSessionBtn" class="btn btn-primary btn-large" style="margin-top:24px">
-        Start the session <span class="btn-arrow">▷</span>
+      <div id="themePartnerStatus" class="theme-partner-status">Waiting for partner to join...</div>
+      <button id="startSessionBtn" class="btn btn-primary btn-large" style="margin-top:16px" disabled>
+        Waiting for partner... <span class="btn-arrow">▷</span>
       </button>
     </div>
 
@@ -175,6 +176,9 @@
       </div>
     </div>
   </div>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast"></div>
 
   <script src="assets.js"></script>
   <script src="app.js"></script>

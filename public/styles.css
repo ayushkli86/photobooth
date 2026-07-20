@@ -175,7 +175,7 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:
   .camera-layout{flex-direction:column;align-items:center}
   .camera-wrapper{width:100%;max-width:320px;height:280px}
   .navbar{padding:12px 16px}
-  .booth-info{display:none}
+  .booth-info{display:flex;align-items:center;gap:8px}
   .strip-frame{width:160px}
 }
 @media(max-width:480px){
@@ -197,3 +197,11 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:
 .step,.faq-item{animation:slideUp .5s ease-out both}
 .step:nth-child(1){animation-delay:.1s}.step:nth-child(2){animation-delay:.2s}
 .step:nth-child(3){animation-delay:.3s}.step:nth-child(4){animation-delay:.4s}
+
+/* Toast Notification */
+.toast{position:fixed;bottom:40px;left:50%;transform:translateX(-50%) translateY(100px);background:#333;color:#FFF;padding:14px 28px;border-radius:12px;font-size:15px;font-weight:600;z-index:9999;transition:transform .4s cubic-bezier(.4,0,.2,1),opacity .4s;opacity:0;pointer-events:none;box-shadow:0 4px 24px rgba(0,0,0,.25)}
+.toast.show{transform:translateX(-50%) translateY(0);opacity:1}
+
+/* Theme partner status */
+.theme-partner-status{text-align:center;font-size:14px;color:var(--text-muted);margin-top:16px;font-weight:500}
+.status-connected{color:#27AE60;font-weight:700}
