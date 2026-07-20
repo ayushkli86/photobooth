@@ -1,5 +1,6 @@
 /**
- * PHOTOBHOOH — v5 (camera gesture fix)
+ * PHOTOBHOOH v6 — WebRTC + DataChannel (Phase 1+2)
+ * Partner video + instant sync via peer-to-peer connection
  */
 (function(){
   'use strict';
@@ -8,7 +9,10 @@
     code: null, userId: null, theme: 'classic', isHost: false,
     partnerConnected: false, currentPhoto: 0, totalPhotos: 4,
     photos: [null,null,null,null], myStream: null,
-    capturing: false, pollTimer: null, sessionStarted: false
+    capturing: false, sessionStarted: false,
+    // WebRTC
+    pc: null, dc: null, partnerStream: null,
+    signalingTimer: null, connectionTimer: null,
   };
 
   const $ = s => document.querySelector(s);
@@ -23,7 +27,7 @@
     leaveBtn: $('#leaveRoomBtn'), themeSel: $('#themeSelector'),
     startBtn: $('#startSessionBtn'), camArea: $('#cameraArea'),
     myVideo: $('#myVideo'), myCanvas: $('#myCanvas'),
-    partnerPlaceholder: $('#partnerPlaceholder'),
+    partnerVideo: $('#partnerVideo'), partnerPlaceholder: $('#partnerPlaceholder'),
     countdown: $('#countdownOverlay'), countNum: $('#countdownNumber'),
     flash: $('#flashEffect'), captureBtn: $('#captureBtn'),
     captureHint: $('#captureHint'), progress: $('#photoProgress'),
@@ -51,7 +55,6 @@
 
     S.userId = 'u_' + Math.random().toString(36).slice(2,10);
 
-    // Auto-join from URL hash — prefill only, require tap
     const h = window.location.hash.slice(1);
     if(h && h.length >= 4){
       E.joinInput.value = h;
@@ -64,7 +67,7 @@
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode:'user', width:{ideal:640}, height:{ideal:480} },
-        audio: false
+        audio: true
       });
       S.myStream = stream;
       E.myVideo.srcObject = stream;
@@ -75,19 +78,19 @@
     }
   }
 
-  // ── API HELPER ───────────────────────────────
+  // ── API ──────────────────────────────────────
   async function api(body, retries = 2){
     for(let attempt = 0; attempt <= retries; attempt++){
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10000);
+        const c = new AbortController();
+        const t = setTimeout(() => c.abort(), 10000);
         const r = await fetch(API, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
-          signal: controller.signal
+          signal: c.signal
         });
-        clearTimeout(timeout);
+        clearTimeout(t);
         return await r.json();
       } catch(e) {
         if(attempt === retries) return { ok: false, error: 'Network error' };
@@ -97,18 +100,18 @@
   }
 
   // ── CREATE ROOM ──────────────────────────────
-  // Camera requested FIRST in sync with click
   function createRoom(){
     hideError();
     setLoading(E.createBtn, 'Creating...');
-    // Request camera NOW (same frame as click) — then do async work
-    requestCamera().then(camOk => {
+    requestCamera().then(() => {
       return api({ action:'create', theme: S.theme, userId: S.userId });
     }).then(res => {
       if(!res.ok) throw new Error(res.error);
       S.code = res.code;
       S.isHost = true;
       enterBooth();
+      // Host starts signaling immediately
+      startWebRTC();
     }).catch(e => {
       showError(e.message || 'Failed to create room');
       resetBtn(E.createBtn, 'Create a room');
@@ -116,14 +119,12 @@
   }
 
   // ── JOIN ROOM ────────────────────────────────
-  // Camera requested FIRST in sync with click
   function joinRoom(){
     const code = E.joinInput.value.trim().toUpperCase();
     if(!code || code.length < 4){ showError('Enter a valid room code'); return; }
     hideError();
     setLoading(E.joinBtn, 'Joining...');
-    // Request camera NOW (same frame as click) — then do async work
-    requestCamera().then(camOk => {
+    requestCamera().then(() => {
       return api({ action:'join', code, userId: S.userId });
     }).then(res => {
       if(!res.ok) throw new Error(res.error);
@@ -131,6 +132,8 @@
       S.theme = res.room.theme || 'classic';
       S.isHost = false;
       enterBooth();
+      // Guest starts signaling immediately
+      startWebRTC();
     }).catch(e => {
       showError(e.message || 'Could not join room');
       resetBtn(E.joinBtn, 'Join');
@@ -146,7 +149,7 @@
     if(S.isHost){
       E.themeSel.style.display = '';
       E.camArea.classList.add('hidden');
-      if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Waiting for partner to join...';
+      if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Waiting for partner...';
       if(E.startBtn){
         E.startBtn.disabled = true;
         E.startBtn.innerHTML = 'Waiting for partner... <span class="btn-arrow">▷</span>';
@@ -155,21 +158,237 @@
     } else {
       E.themeSel.style.display = 'none';
       E.camArea.classList.remove('hidden');
-      E.captureHint.textContent = 'Connected! Waiting for host to start...';
-      updatePartnerStatus(true);
+      E.captureHint.textContent = 'Connecting...';
+      updatePartnerStatus(false);
     }
 
     $$('.theme-card').forEach(c => c.classList.toggle('active', c.dataset.theme === S.theme));
 
-    // Camera already started from requestCamera() above
-    // If stream wasn't obtained, show retry
-    if(!S.myStream){
-      if(E.partnerPlaceholder){
-        E.partnerPlaceholder.innerHTML = '<div style="text-align:center;padding:20px"><p style="color:#888;margin-bottom:12px">Camera access needed</p><button onclick="window.retryCamera()" class="btn btn-primary btn-small">Enable Camera</button></div>';
-      }
+    if(!S.myStream && E.partnerPlaceholder){
+      E.partnerPlaceholder.innerHTML = '<div style="text-align:center;padding:20px"><p style="color:#888;margin-bottom:12px">Camera needed</p><button onclick="window.retryCamera()" class="btn btn-primary btn-small">Enable Camera</button></div>';
+    }
+  }
+
+  // ════════════════════════════════════════════
+  // WEBRTC — Peer-to-peer video + data
+  // ════════════════════════════════════════════
+
+  // ICE servers (free Google STUN)
+  const iceServers = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ]
+  };
+
+  function startWebRTC(){
+    S.pc = new RTCPeerConnection(iceServers);
+
+    // Add local stream tracks
+    if(S.myStream){
+      S.myStream.getTracks().forEach(track => S.pc.addTrack(track, S.myStream));
     }
 
-    startPolling();
+    // Receive partner's stream
+    S.pc.ontrack = (event) => {
+      S.partnerStream = event.streams[0];
+      E.partnerVideo.srcObject = event.streams[0];
+      if(E.partnerPlaceholder) E.partnerPlaceholder.style.display = 'none';
+      E.partnerVideo.style.display = 'block';
+      partnerConnected();
+    };
+
+    // ICE candidate handling
+    S.pc.onicecandidate = (event) => {
+      if(event.candidate){
+        api({
+          action: 'signal',
+          code: S.code,
+          userId: S.userId,
+          type: 'candidate',
+          data: event.candidate
+        });
+      }
+    };
+
+    // DataChannel for commands
+    if(S.isHost){
+      S.dc = S.pc.createDataChannel('booth');
+      setupDataChannel();
+      createOffer();
+    } else {
+      S.pc.ondatachannel = (event) => {
+        S.dc = event.channel;
+        setupDataChannel();
+      };
+      pollForOffer(); // Guest polls for host's offer
+    }
+
+    // Start polling for signals
+    pollForSignals();
+  }
+
+  // ── HOST: Create offer ──────────────────────
+  async function createOffer(){
+    try {
+      const offer = await S.pc.createOffer();
+      await S.pc.setLocalDescription(offer);
+      await api({
+        action: 'signal',
+        code: S.code,
+        userId: S.userId,
+        type: 'offer',
+        data: { sdp: offer.sdp, type: offer.type }
+      });
+    } catch(e){
+      console.error('createOffer error:', e);
+    }
+  }
+
+  // ── GUEST: Poll for offer ───────────────────
+  async function pollForOffer(){
+    const maxTries = 20;
+    for(let i = 0; i < maxTries; i++){
+      try {
+        const res = await api({
+          action: 'get-signals',
+          code: S.code,
+          otherUserId: getOtherUserId() // host's userId
+        });
+        if(res.ok && res.signals){
+          const offer = res.signals.find(s => s.type === 'offer');
+          if(offer && offer.data){
+            await S.pc.setRemoteDescription(new RTCSessionDescription(offer.data));
+            const answer = await S.pc.createAnswer();
+            await S.pc.setLocalDescription(answer);
+            await api({
+              action: 'signal',
+              code: S.code,
+              userId: S.userId,
+              type: 'answer',
+              data: { sdp: answer.sdp, type: answer.type }
+            });
+            return;
+          }
+        }
+      } catch(e) {}
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    console.warn('WebRTC: No offer received from host');
+  }
+
+  // ── Poll for signals (room-level queue) ────
+  let lastSignalCheck = 0;
+
+  async function pollForSignals(){
+    if(S.signalingTimer) clearInterval(S.signalingTimer);
+    S.signalingTimer = setInterval(async () => {
+      if(!S.code || !S.pc) return;
+      try {
+        const res = await api({ action: 'get-signals', code: S.code });
+        if(!res.ok || !res.signals) return;
+
+        // Filter to new signals NOT from us
+        const newSignals = res.signals.filter(s => s.ts > lastSignalCheck && s.from !== S.userId);
+
+        for(const sig of newSignals){
+          if(sig.type === 'candidate' && sig.data && S.pc.remoteDescription && S.pc.connectionState !== 'closed'){
+            try { await S.pc.addIceCandidate(new RTCIceCandidate(sig.data)); } catch(e) {}
+          }
+          if(sig.type === 'offer' && sig.data && !S.pc.remoteDescription && !S.isHost){
+            try {
+              await S.pc.setRemoteDescription(new RTCSessionDescription(sig.data));
+              const answer = await S.pc.createAnswer();
+              await S.pc.setLocalDescription(answer);
+              await api({
+                action: 'signal', code: S.code, userId: S.userId,
+                type: 'answer', data: { sdp: answer.sdp, type: answer.type }
+              });
+            } catch(e) {}
+          }
+          if(sig.type === 'answer' && sig.data && S.pc.remoteDescription?.type === 'offer'){
+            try { await S.pc.setRemoteDescription(new RTCSessionDescription(sig.data)); } catch(e) {}
+          }
+        }
+
+        if(newSignals.length > 0){
+          lastSignalCheck = Date.now();
+        }
+      } catch(e) {}
+    }, 1500);
+  }
+
+  function getOtherUserId(){ return null; } // Not needed with room-level queue
+
+  // ── DATACHANNEL SETUP ───────────────────────
+  function setupDataChannel(){
+    if(!S.dc) return;
+    S.dc.onopen = () => {
+      console.log('DataChannel open');
+    };
+    S.dc.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        handleDataChannelMessage(msg);
+      } catch(e) {}
+    };
+    S.dc.onclose = () => {
+      console.log('DataChannel closed');
+    };
+  }
+
+  function sendDC(msg){
+    if(S.dc && S.dc.readyState === 'open'){
+      S.dc.send(JSON.stringify(msg));
+    }
+  }
+
+  function handleDataChannelMessage(msg){
+    switch(msg.type){
+      case 'partner-ready':
+        partnerConnected();
+        break;
+      case 'start-countdown':
+        if(!S.capturing) startCountdown(msg.photoIndex);
+        break;
+      case 'session-started':
+        S.sessionStarted = true;
+        S.theme = msg.theme || S.theme;
+        E.themeSel.classList.add('hidden');
+        E.camArea.classList.remove('hidden');
+        E.captureBtn.disabled = true;
+        E.captureHint.textContent = 'Session started! Tap to take a photo.';
+        E.captureBtn.disabled = false;
+        break;
+      case 'photo-captured':
+        // Partner captured a photo (just for info)
+        break;
+      case 'retake':
+        doRetake();
+        break;
+    }
+  }
+
+  // ── Partner connected ───────────────────────
+  function partnerConnected(){
+    S.partnerConnected = true;
+    updatePartnerStatus(true);
+    showToast('🎀 Partner connected!');
+
+    // Send ready signal
+    setTimeout(() => sendDC({ type: 'partner-ready' }), 500);
+
+    if(S.isHost){
+      if(E.themePartnerStatus) E.themePartnerStatus.innerHTML = '<span class="status-connected">✓ Partner connected!</span>';
+      if(E.startBtn){
+        E.startBtn.disabled = false;
+        E.startBtn.innerHTML = 'Start the session <span class="btn-arrow">▷</span>';
+      }
+      E.captureHint.textContent = 'Partner joined! Click start.';
+    } else {
+      E.captureBtn.disabled = false;
+      E.captureHint.textContent = 'Connected! Tap to take a photo.';
+    }
   }
 
   // ── START SESSION ────────────────────────────
@@ -177,54 +396,9 @@
     E.themeSel.classList.add('hidden');
     E.camArea.classList.remove('hidden');
     S.sessionStarted = true;
-    api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:0, userId:S.userId });
+    sendDC({ type: 'session-started', theme: S.theme });
     E.captureBtn.disabled = false;
     E.captureHint.textContent = 'Tap to take the first photo!';
-  }
-
-  // ── POLLING ──────────────────────────────────
-  function startPolling(){
-    if(S.pollTimer) clearInterval(S.pollTimer);
-    pollRoom();
-    S.pollTimer = setInterval(pollRoom, 3000);
-  }
-
-  async function pollRoom(){
-    if(!S.code) return;
-    try {
-      const res = await api({ action:'get', code:S.code });
-      if(!res.ok) return;
-      const room = res.room;
-
-      const wasConnected = S.partnerConnected;
-      S.partnerConnected = !!room.guest;
-
-      if(S.partnerConnected && !wasConnected){
-        updatePartnerStatus(true);
-        showToast('🎀 Partner connected!');
-        E.captureBtn.disabled = false;
-
-        if(S.isHost){
-          if(E.themePartnerStatus) E.themePartnerStatus.innerHTML = '<span class="status-connected">✓ Partner connected!</span>';
-          if(E.startBtn){
-            E.startBtn.disabled = false;
-            E.startBtn.innerHTML = 'Start the session <span class="btn-arrow">▷</span>';
-          }
-          E.captureHint.textContent = 'Partner joined! Click start.';
-        } else {
-          E.captureHint.textContent = 'Connected! Tap to take a photo.';
-        }
-      }
-
-      if(!S.partnerConnected && wasConnected){
-        updatePartnerStatus(false);
-        showToast('Partner disconnected');
-        E.captureBtn.disabled = true;
-        if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Partner left. Waiting...';
-        E.captureHint.textContent = 'Partner disconnected...';
-      }
-
-    } catch(e){}
   }
 
   // ── CAPTURE ──────────────────────────────────
@@ -232,9 +406,8 @@
     if(S.capturing || !S.partnerConnected || S.currentPhoto >= S.totalPhotos) return;
     S.capturing = true;
     E.captureBtn.disabled = true;
-    if(S.isHost){
-      api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:S.currentPhoto, userId:S.userId });
-    }
+    // Send countdown command via WebRTC
+    sendDC({ type: 'start-countdown', photoIndex: S.currentPhoto });
     startCountdown(S.currentPhoto);
   }
 
@@ -271,19 +444,16 @@
 
     const config = Assets.themes[S.theme];
     if(config && config.filter !== 'none'){
-      ctx.filter = config.filter;
-      ctx.drawImage(c, 0, 0);
-      ctx.filter = 'none';
+      ctx.filter = config.filter; ctx.drawImage(c, 0, 0); ctx.filter = 'none';
     }
 
     S.photos[idx] = c.toDataURL('image/jpeg', 0.85);
     updateProgress(idx);
     S.currentPhoto = idx + 1;
     S.capturing = false;
-    api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:S.currentPhoto, userId:S.userId });
+    sendDC({ type: 'photo-captured', photoIndex: idx });
 
     if(S.currentPhoto >= S.totalPhotos){
-      api({ action:'update-state', code:S.code, state:'done', userId:S.userId });
       setTimeout(showStrip, 800);
     } else {
       E.captureBtn.disabled = false;
@@ -321,20 +491,25 @@
     a.click();
   }
 
-  async function retake(){
+  function retake(){
     S.currentPhoto = 0; S.photos = [null,null,null,null]; S.capturing = false;
     S.sessionStarted = true;
+    sendDC({ type: 'retake' });
+    doRetake();
+  }
+
+  function doRetake(){
     $$('.progress-dot').forEach((d, i) => { d.classList.remove('done','active'); if(i===0) d.classList.add('active'); });
     E.stripResult.classList.add('hidden');
     E.camArea.classList.remove('hidden');
     E.captureBtn.disabled = false;
     E.captureHint.textContent = `Photo 1 of ${S.totalPhotos} — tap!`;
-    await api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:0, userId:S.userId });
   }
 
   // ── LEAVE ────────────────────────────────────
   function leaveRoom(){
-    if(S.pollTimer) clearInterval(S.pollTimer);
+    if(S.signalingTimer) clearInterval(S.signalingTimer);
+    if(S.pc){ S.pc.close(); S.pc = null; }
     if(S.myStream) S.myStream.getTracks().forEach(t => t.stop());
     api({ action:'leave', code:S.code, userId:S.userId });
     S.code = null; S.isHost = false; S.partnerConnected = false;
@@ -366,16 +541,15 @@
   document.addEventListener('DOMContentLoaded', init);
 })();
 
-// Global camera retry
 window.retryCamera = async function(){
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode:'user', width:{ideal:640}, height:{ideal:480} },
-      audio: false
+      audio: true
     });
     document.querySelector('#myVideo').srcObject = stream;
     document.querySelector('#partnerPlaceholder').innerHTML = '<span>waiting for partner...</span>';
   } catch(e){
-    alert('Camera access is required. Please allow camera in your browser settings and refresh.');
+    alert('Camera access required. Allow camera in browser settings.');
   }
 };
