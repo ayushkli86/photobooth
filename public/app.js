@@ -1,12 +1,5 @@
 /**
- * PHOTOBHOOH — Main Application (v3 — connection visibility fixed)
- *
- * All v2 fixes plus:
- * - Big toast notification when partner connects
- * - Partner status visible on theme selector page
- * - Mobile-friendly status indicators
- * - Host sees clear "Partner joined!" + can start session
- * - Guest sees big "Connected!" indicator
+ * PHOTOBHOOH — v5 (camera gesture fix)
  */
 (function(){
   'use strict';
@@ -36,9 +29,7 @@
     captureHint: $('#captureHint'), progress: $('#photoProgress'),
     stripResult: $('#stripResult'), stripCanvas: $('#stripCanvas'),
     downloadBtn: $('#downloadBtn'), retakeBtn: $('#retakeBtn'),
-    // NEW elements
-    toast: $('#toast'),
-    themePartnerStatus: $('#themePartnerStatus')
+    toast: $('#toast'), themePartnerStatus: $('#themePartnerStatus')
   };
 
   // ── INIT ─────────────────────────────────────
@@ -60,24 +51,31 @@
 
     S.userId = 'u_' + Math.random().toString(36).slice(2,10);
 
-    // Auto-join from URL hash — prefill code, require tap to join
+    // Auto-join from URL hash — prefill only, require tap
     const h = window.location.hash.slice(1);
     if(h && h.length >= 4){
       E.joinInput.value = h;
-      // Don't auto-join — show a prompt instead
       E.joinInput.focus();
     }
   }
 
-  // ── TOAST NOTIFICATION ───────────────────────
-  function showToast(message, duration = 4000){
-    if(!E.toast) return;
-    E.toast.textContent = message;
-    E.toast.classList.add('show');
-    setTimeout(() => E.toast.classList.remove('show'), duration);
+  // ── CAMERA (must be called from user gesture) ─
+  async function requestCamera(){
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode:'user', width:{ideal:640}, height:{ideal:480} },
+        audio: false
+      });
+      S.myStream = stream;
+      E.myVideo.srcObject = stream;
+      return true;
+    } catch(e){
+      console.warn('Camera denied:', e);
+      return false;
+    }
   }
 
-  // ── API HELPER with retry ────────────────────
+  // ── API HELPER ───────────────────────────────
   async function api(body, retries = 2){
     for(let attempt = 0; attempt <= retries; attempt++){
       try {
@@ -92,98 +90,94 @@
         clearTimeout(timeout);
         return await r.json();
       } catch(e) {
-        if(attempt === retries) {
-          console.error('API failed:', e);
-          return { ok: false, error: 'Network error' };
-        }
+        if(attempt === retries) return { ok: false, error: 'Network error' };
         await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
       }
     }
   }
 
   // ── CREATE ROOM ──────────────────────────────
-  async function createRoom(){
-    try {
-      hideError();
-      setLoading(E.createBtn, 'Creating...');
-      const res = await api({ action:'create', theme: S.theme, userId: S.userId });
+  // Camera requested FIRST in sync with click
+  function createRoom(){
+    hideError();
+    setLoading(E.createBtn, 'Creating...');
+    // Request camera NOW (same frame as click) — then do async work
+    requestCamera().then(camOk => {
+      return api({ action:'create', theme: S.theme, userId: S.userId });
+    }).then(res => {
       if(!res.ok) throw new Error(res.error);
       S.code = res.code;
       S.isHost = true;
       enterBooth();
-    } catch(e){
+    }).catch(e => {
       showError(e.message || 'Failed to create room');
       resetBtn(E.createBtn, 'Create a room');
-    }
+    });
   }
 
   // ── JOIN ROOM ────────────────────────────────
-  async function joinRoom(){
+  // Camera requested FIRST in sync with click
+  function joinRoom(){
     const code = E.joinInput.value.trim().toUpperCase();
     if(!code || code.length < 4){ showError('Enter a valid room code'); return; }
-    try {
-      hideError();
-      setLoading(E.joinBtn, 'Joining...');
-      const res = await api({ action:'join', code, userId: S.userId });
+    hideError();
+    setLoading(E.joinBtn, 'Joining...');
+    // Request camera NOW (same frame as click) — then do async work
+    requestCamera().then(camOk => {
+      return api({ action:'join', code, userId: S.userId });
+    }).then(res => {
       if(!res.ok) throw new Error(res.error);
       S.code = res.code;
       S.theme = res.room.theme || 'classic';
       S.isHost = false;
       enterBooth();
-    } catch(e){
+    }).catch(e => {
       showError(e.message || 'Could not join room');
       resetBtn(E.joinBtn, 'Join');
-    }
+    });
   }
 
   // ── ENTER BOOTH ──────────────────────────────
-  async function enterBooth(){
+  function enterBooth(){
     showPage('booth');
     E.codeDisplay.textContent = S.code;
     window.history.replaceState(null, '', '#' + S.code);
 
     if(S.isHost){
-      // Host: show theme selector, hide camera for now
       E.themeSel.style.display = '';
       E.camArea.classList.add('hidden');
-      // Show partner status on theme selector
       if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Waiting for partner to join...';
-      if(E.startBtn) E.startBtn.disabled = true;
+      if(E.startBtn){
+        E.startBtn.disabled = true;
+        E.startBtn.innerHTML = 'Waiting for partner... <span class="btn-arrow">▷</span>';
+      }
+      updatePartnerStatus(false);
     } else {
-      // Guest: skip theme selector, go straight to camera
       E.themeSel.style.display = 'none';
       E.camArea.classList.remove('hidden');
-      E.captureHint.textContent = 'Connecting...';
+      E.captureHint.textContent = 'Connected! Waiting for host to start...';
+      updatePartnerStatus(true);
     }
 
     $$('.theme-card').forEach(c => c.classList.toggle('active', c.dataset.theme === S.theme));
 
-    // Start camera — with retry on failure
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode:'user', width:{ideal:640}, height:{ideal:480} },
-        audio: false
-      });
-      S.myStream = stream;
-      E.myVideo.srcObject = stream;
-    } catch(e){
-      console.warn('Camera denied:', e);
-      // Show camera placeholder with retry button instead of error
+    // Camera already started from requestCamera() above
+    // If stream wasn't obtained, show retry
+    if(!S.myStream){
       if(E.partnerPlaceholder){
         E.partnerPlaceholder.innerHTML = '<div style="text-align:center;padding:20px"><p style="color:#888;margin-bottom:12px">Camera access needed</p><button onclick="window.retryCamera()" class="btn btn-primary btn-small">Enable Camera</button></div>';
       }
     }
 
-    // Start polling IMMEDIATELY
     startPolling();
   }
 
-  // ── START SESSION (host clicks "Start") ──────
-  async function startSession(){
+  // ── START SESSION ────────────────────────────
+  function startSession(){
     E.themeSel.classList.add('hidden');
     E.camArea.classList.remove('hidden');
     S.sessionStarted = true;
-    await api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:0, userId:S.userId });
+    api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:0, userId:S.userId });
     E.captureBtn.disabled = false;
     E.captureHint.textContent = 'Tap to take the first photo!';
   }
@@ -202,55 +196,35 @@
       if(!res.ok) return;
       const room = res.room;
 
-      // Partner status
       const wasConnected = S.partnerConnected;
       S.partnerConnected = !!room.guest;
 
       if(S.partnerConnected && !wasConnected){
-        // PARTNER JUST JOINED — big notification!
         updatePartnerStatus(true);
         showToast('🎀 Partner connected!');
+        E.captureBtn.disabled = false;
 
         if(S.isHost){
-          // Host: enable start button
           if(E.themePartnerStatus) E.themePartnerStatus.innerHTML = '<span class="status-connected">✓ Partner connected!</span>';
           if(E.startBtn){
             E.startBtn.disabled = false;
             E.startBtn.innerHTML = 'Start the session <span class="btn-arrow">▷</span>';
           }
-          // If host already started session, enable capture
-          if(S.sessionStarted){
-            E.captureBtn.disabled = false;
-            E.captureHint.textContent = 'Partner joined! Tap to take a photo.';
-          }
+          E.captureHint.textContent = 'Partner joined! Click start.';
         } else {
-          // Guest: show connected status
-          E.captureBtn.disabled = false;
           E.captureHint.textContent = 'Connected! Tap to take a photo.';
         }
       }
 
-      // Host: detect if partner left
       if(!S.partnerConnected && wasConnected){
         updatePartnerStatus(false);
         showToast('Partner disconnected');
         E.captureBtn.disabled = true;
-        if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Partner left. Waiting for new partner...';
+        if(E.themePartnerStatus) E.themePartnerStatus.textContent = 'Partner left. Waiting...';
         E.captureHint.textContent = 'Partner disconnected...';
       }
 
-      // Guest: sync state from host
-      if(room.state === 'shooting' && !S.sessionStarted && !S.isHost){
-        S.sessionStarted = true;
-        S.currentPhoto = room.currentPhoto || 0;
-        E.camArea.classList.remove('hidden');
-        E.captureBtn.disabled = false;
-        E.captureHint.textContent = `Photo ${S.currentPhoto + 1} of ${S.totalPhotos}`;
-      }
-
-    } catch(e){
-      // Silent fail for polling
-    }
+    } catch(e){}
   }
 
   // ── CAPTURE ──────────────────────────────────
@@ -258,7 +232,6 @@
     if(S.capturing || !S.partnerConnected || S.currentPhoto >= S.totalPhotos) return;
     S.capturing = true;
     E.captureBtn.disabled = true;
-
     if(S.isHost){
       api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:S.currentPhoto, userId:S.userId });
     }
@@ -269,37 +242,30 @@
     let count = 3;
     E.countdown.classList.remove('hidden');
     E.countNum.textContent = count;
-
     const animate = () => {
       E.countNum.style.animation = 'none';
       void E.countNum.offsetWidth;
       E.countNum.style.animation = 'countdown-pulse 0.5s ease-out';
     };
     animate();
-
-    const iv = setInterval(async () => {
+    const iv = setInterval(() => {
       count--;
-      if(count > 0){
-        E.countNum.textContent = count;
-        animate();
-      } else {
+      if(count > 0){ E.countNum.textContent = count; animate(); }
+      else {
         clearInterval(iv);
         E.countdown.classList.add('hidden');
         E.flash.classList.add('active');
         setTimeout(() => E.flash.classList.remove('active'), 150);
-        await doCapture(idx);
+        doCapture(idx);
       }
     }, 1000);
   }
 
-  async function doCapture(idx){
+  function doCapture(idx){
     const v = E.myVideo, c = E.myCanvas;
-    c.width = v.videoWidth || 640;
-    c.height = v.videoHeight || 480;
+    c.width = v.videoWidth || 640; c.height = v.videoHeight || 480;
     const ctx = c.getContext('2d');
-
-    ctx.translate(c.width, 0);
-    ctx.scale(-1, 1);
+    ctx.translate(c.width, 0); ctx.scale(-1, 1);
     ctx.drawImage(v, 0, 0, c.width, c.height);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
 
@@ -314,7 +280,6 @@
     updateProgress(idx);
     S.currentPhoto = idx + 1;
     S.capturing = false;
-
     api({ action:'update-state', code:S.code, state:'shooting', currentPhoto:S.currentPhoto, userId:S.userId });
 
     if(S.currentPhoto >= S.totalPhotos){
@@ -340,12 +305,10 @@
     E.camArea.classList.add('hidden');
     E.stripResult.classList.remove('hidden');
     E.captureBtn.disabled = true;
-
     const strip = Assets.generateStrip(S.photos, S.theme, {
       pw:280, ph:350, pad:16, gap:10, showLabel:true,
       labelText:'photobooth · 인생네컷', showStickers:true
     });
-
     E.stripCanvas.width = strip.width;
     E.stripCanvas.height = strip.height;
     E.stripCanvas.getContext('2d').drawImage(strip, 0, 0);
@@ -359,14 +322,9 @@
   }
 
   async function retake(){
-    S.currentPhoto = 0;
-    S.photos = [null,null,null,null];
-    S.capturing = false;
+    S.currentPhoto = 0; S.photos = [null,null,null,null]; S.capturing = false;
     S.sessionStarted = true;
-    $$('.progress-dot').forEach((d, i) => {
-      d.classList.remove('done', 'active');
-      if(i === 0) d.classList.add('active');
-    });
+    $$('.progress-dot').forEach((d, i) => { d.classList.remove('done','active'); if(i===0) d.classList.add('active'); });
     E.stripResult.classList.add('hidden');
     E.camArea.classList.remove('hidden');
     E.captureBtn.disabled = false;
@@ -375,7 +333,7 @@
   }
 
   // ── LEAVE ────────────────────────────────────
-  async function leaveRoom(){
+  function leaveRoom(){
     if(S.pollTimer) clearInterval(S.pollTimer);
     if(S.myStream) S.myStream.getTracks().forEach(t => t.stop());
     api({ action:'leave', code:S.code, userId:S.userId });
@@ -389,18 +347,18 @@
   }
 
   // ── UTILS ────────────────────────────────────
-  function showPage(p){
-    $$('.page').forEach(x => x.classList.remove('active'));
-    $(`#${p}`).classList.add('active');
-  }
-  function showError(m){
-    E.error.textContent = m;
-    E.error.classList.remove('hidden');
-  }
+  function showPage(p){ $$('.page').forEach(x=>x.classList.remove('active')); $(`#${p}`).classList.add('active'); }
+  function showError(m){ E.error.textContent = m; E.error.classList.remove('hidden'); }
   function hideError(){ E.error.classList.add('hidden'); }
   function updatePartnerStatus(ok){
     E.partnerStatus.textContent = ok ? '✓ Connected!' : 'Waiting for partner...';
     E.partnerStatus.className = 'partner-status ' + (ok ? 'connected' : 'waiting');
+  }
+  function showToast(msg, dur = 4000){
+    if(!E.toast) return;
+    E.toast.textContent = msg;
+    E.toast.classList.add('show');
+    setTimeout(() => E.toast.classList.remove('show'), dur);
   }
   function setLoading(btn, text){ btn.disabled = true; btn.textContent = text; }
   function resetBtn(btn, text){ btn.disabled = false; btn.innerHTML = text + ' <span class="btn-arrow">▷</span>'; }
@@ -408,7 +366,7 @@
   document.addEventListener('DOMContentLoaded', init);
 })();
 
-// Global camera retry (called from onclick)
+// Global camera retry
 window.retryCamera = async function(){
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
