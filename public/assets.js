@@ -191,6 +191,120 @@ const Assets = {
     return cv;
   },
 
+  // ════════════════════════════════════════════
+  // COMBINED STRIP — Both users side by side
+  // ════════════════════════════════════════════
+
+  generateCombinedStrip(myPhotos, partnerPhotos, theme = 'classic', opts = {}) {
+    const c = this.themes[theme] || this.themes.classic;
+    const { pw=280, ph=350, pad=16, gap=10, labelH=50, showLabel=true, labelText='photobooth · 인생네컷', showStickers=true } = opts;
+
+    // Each slot: host on left half, guest on right half
+    const slotW = pw; // full slot width
+    const halfW = Math.floor(slotW / 2);
+    const W = slotW + pad*2;
+    const H = ph*4 + gap*3 + pad*2 + (showLabel?labelH:0);
+
+    const cv = document.createElement('canvas');
+    cv.width = W; cv.height = H;
+    const ctx = cv.getContext('2d');
+
+    // Background gradient
+    const gr = ctx.createLinearGradient(0,0,0,H);
+    gr.addColorStop(0, c.gradient[0]); gr.addColorStop(1, c.gradient[1]);
+    ctx.fillStyle = gr;
+    this._rr(ctx,0,0,W,H,c.borderRadius+4); ctx.fill();
+
+    // Border
+    ctx.strokeStyle = c.stripBorder; ctx.lineWidth = c.borderWidth;
+    this._rr(ctx,0,0,W,H,c.borderRadius+4); ctx.stroke();
+
+    // Draw each slot
+    for(let i = 0; i < 4; i++){
+      const x = pad;
+      const y = pad + i*(ph+gap);
+
+      // Slot background
+      ctx.fillStyle = c.photoBg;
+      this._rr(ctx, x, y, slotW, ph, c.borderRadius);
+      ctx.fill();
+
+      // Draw divider line in center
+      ctx.strokeStyle = c.stripBorder;
+      ctx.globalAlpha = 0.4;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(x + halfW, y + 10);
+      ctx.lineTo(x + halfW, y + ph - 10);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+
+      // ── Draw MY photo (left half) ──────────
+      if(myPhotos && myPhotos[i]){
+        ctx.save();
+        this._rr(ctx, x, y, halfW - 2, ph, c.borderRadius);
+        ctx.clip();
+
+        const img = new Image();
+        img.src = myPhotos[i];
+        const ir = img.width/img.height, sr = (halfW-2)/ph;
+        let sx,sy,sw,sh;
+        if(ir>sr){ sh=img.height; sw=sh*sr; sx=(img.width-sw)/2; sy=0; }
+        else { sw=img.width; sh=sw/sr; sx=0; sy=(img.height-sh)/2; }
+        try { ctx.drawImage(img,sx,sy,sw,sh,x,y,halfW-2,ph); } catch(e){}
+        ctx.restore();
+      }
+
+      // ── Draw PARTNER photo (right half) ────
+      if(partnerPhotos && partnerPhotos[i]){
+        ctx.save();
+        this._rr(ctx, x + halfW + 2, y, halfW - 2, ph, c.borderRadius);
+        ctx.clip();
+
+        const img = new Image();
+        img.src = partnerPhotos[i];
+        const ir = img.width/img.height, sr = (halfW-2)/ph;
+        let sx,sy,sw,sh;
+        if(ir>sr){ sh=img.height; sw=sh*sr; sx=(img.width-sw)/2; sy=0; }
+        else { sw=img.width; sh=sw/sr; sx=0; sy=(img.height-sh)/2; }
+        try { ctx.drawImage(img,sx,sy,sw,sh,x+halfW+2,y,halfW-2,ph); } catch(e){}
+        ctx.restore();
+      }
+
+      // Slot number
+      ctx.fillStyle = c.accentColor; ctx.globalAlpha = 0.85;
+      this._rr(ctx, x + slotW - 32, y + 8, 24, 24, 12); ctx.fill();
+      ctx.globalAlpha = 1; ctx.fillStyle = '#FFF';
+      ctx.font = `bold 12px ${c.labelFont}`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(String(i+1), x + slotW - 20, y + 20);
+    }
+
+    // Label
+    if(showLabel){
+      ctx.fillStyle = c.textColor;
+      ctx.font = `500 ${c.labelSize}px ${c.labelFont}`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(labelText, W/2, H-labelH+labelH/2);
+    }
+
+    // Stickers
+    if(showStickers){
+      const pool = c.stickers||['heart','sparkle'];
+      for(let i=0;i<8;i++){
+        const sn=pool[i%pool.length], fn=this.stickers[sn];
+        if(fn){
+          ctx.globalAlpha=0.6+Math.random()*0.3;
+          fn(ctx,pad+Math.random()*(pw-20), pad+Math.random()*(H-pad*2-labelH), 12+Math.random()*16, c.accentColor);
+          ctx.globalAlpha=1;
+        }
+      }
+    }
+    return cv;
+  },
+
   _rr(ctx,x,y,w,h,r){
     ctx.beginPath(); ctx.moveTo(x+r,y);
     ctx.lineTo(x+w-r,y); ctx.arcTo(x+w,y,x+w,y+r,r);

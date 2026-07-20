@@ -18,8 +18,10 @@
   const S = {
     code: null, userId: null, theme: 'classic', isHost: false,
     partnerConnected: false, currentPhoto: 0, totalPhotos: 4,
-    photos: [null,null,null,null], myStream: null,
-    partnerStream: null,
+    photos: [null,null,null,null], // MY photos
+    partnerPhotos: [null,null,null,null], // PARTNER's photos via DataChannel
+    myStream: null, partnerStream: null,
+    partnerPhotosReceived: 0,
     capturing: false, sessionStarted: false,
     socket: null, pollTimer: null,
     // WebRTC
@@ -256,6 +258,8 @@
         if(E.partnerPlaceholder) E.partnerPlaceholder.style.display = 'none';
         S.webrtcConnected = true;
         showToast('📹 Partner video connected!');
+        // Start DataChannel for photo sharing
+        setupDataChannel();
       }
     };
 
@@ -265,6 +269,71 @@
         S.socket.emit('webrtc-ice', { code: S.code, candidate: event.candidate });
       }
     };
+
+    // Host creates the DataChannel
+    if(S.isHost){
+      S.dc = S.pc.createDataChannel('photos', { ordered: true });
+    }
+  }
+
+  // ════════════════════════════════════════════
+  // DataChannel — Photo sharing peer-to-peer
+  // ════════════════════════════════════════════
+
+  function setupDataChannel(){
+    // If guest, listen for host's DataChannel
+    if(!S.isHost){
+      S.pc.ondatachannel = (event) => {
+        S.dc = event.channel;
+        setupDCHandler();
+      };
+    } else {
+      // Host already has dc from createPeerConnection
+      setupDCHandler();
+    }
+  }
+
+  function setupDCHandler(){
+    if(!S.dc) return;
+
+    S.dc.onopen = () => console.log('[dc] DataChannel open');
+
+    S.dc.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if(msg.type === 'photo' && S.isHost){
+          // Guest sent their photo to host
+          const idx = msg.photoIndex;
+          S.partnerPhotos[idx] = msg.data;
+          S.partnerPhotosReceived++;
+          showToast(`📸 Received partner's photo ${idx + 1}!`);
+          // Check if both have all photos
+          checkStripReady();
+        }
+        if(msg.type === 'request-photo' && !S.isHost){
+          // Host is requesting guest's photo (resend)
+        }
+      } catch(e){}
+    };
+
+    S.dc.onclose = () => console.log('[dc] DataChannel closed');
+  }
+
+  function sendPhotoToHost(photoIndex, dataUrl){
+    if(S.dc?.readyState === 'open' && !S.isHost){
+      S.dc.send(JSON.stringify({ type: 'photo', photoIndex, data: dataUrl }));
+      console.log(`[dc] Sent photo ${photoIndex} to host`);
+    }
+  }
+
+  function checkStripReady(){
+    // Check if both users have all 4 photos
+    const myComplete = S.photos.every(p => p !== null);
+    const partnerComplete = S.partnerPhotos.every(p => p !== null);
+    if(myComplete && partnerComplete){
+      // Use combined function
+      showCombinedStrip();
+    }
   }
 
   function startWebRTC(){
@@ -463,7 +532,12 @@
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     const config = Assets.themes[S.theme];
     if(config && config.filter !== 'none'){ ctx.filter = config.filter; ctx.drawImage(c, 0, 0); ctx.filter = 'none'; }
-    S.photos[idx] = c.toDataURL('image/jpeg', 0.85);
+    const imageData = c.toDataURL('image/jpeg', 0.85);
+    S.photos[idx] = imageData;
+
+    // Guest sends photo to host via DataChannel
+    if(!S.isHost) sendPhotoToHost(idx, imageData);
+
     updateProgress(idx);
     S.currentPhoto = idx + 1; S.capturing = false;
 
@@ -486,9 +560,13 @@
   // ── STRIP ────────────────────────────────────
   function showStrip(){
     E.camArea.classList.add('hidden'); E.stripResult.classList.remove('hidden'); E.captureBtn.disabled = true;
-    const strip = Assets.generateStrip(S.photos, S.theme, { pw:280, ph:350, pad:16, gap:10, showLabel:true, labelText:'photobooth · 인생네컷', showStickers:true });
+    const strip = Assets.generateCombinedStrip(S.photos, S.partnerPhotos, S.theme, { pw:280, ph:350, pad:16, gap:10, showLabel:true, labelText:'photobooth · 인생네컷', showStickers:true });
     E.stripCanvas.width = strip.width; E.stripCanvas.height = strip.height;
     E.stripCanvas.getContext('2d').drawImage(strip, 0, 0);
+  }
+
+  function showCombinedStrip(){
+    showStrip();
   }
 
   function downloadStrip(){
